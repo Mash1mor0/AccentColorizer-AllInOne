@@ -3,4 +3,33 @@ name = "AccentColorizer-AllInOne-Rust"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "AccentColorizer"
+path = "src/main.rs"
+
 [dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Controls",
+    "Win32_UI_Shell",
+    "Win32_System_LibraryLoader",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Registry",
+    "Win32_System_Console",
+    "Win32_Security",
+] }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
