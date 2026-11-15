@@ -152,7 +152,9 @@ pub fn get_immersive_color(name: &str) -> Option<Rgb> {
         let get_color_from_color_set_ex: FnGetImmersiveColorFromColorSetEx =
             std::mem::transmute(p_color);
 
-        let color_set = get_user_color_set_pref(false, false);
+        // Pass true for bForceCheckRegistry so uxtheme re-queries the registry
+        // and does NOT return stale in-memory cached colors from the previous theme!
+        let color_set = get_user_color_set_pref(true, false);
         let wide_name = encode_wide(name);
         let color_type = get_color_type_from_name(wide_name.as_ptr());
         let raw = get_color_from_color_set_ex(color_set, color_type, false, 0);

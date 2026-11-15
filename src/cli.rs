@@ -9,9 +9,10 @@ use crate::e11_svg::{
 };
 use crate::listener::{apply_all_in_memory, run_listener};
 use crate::system::{
-    acquire_single_instance, detect_windows_version, is_elevated, release_single_instance,
-    restart_explorer, run_elevated_self, WindowsVersion,
+    acquire_single_instance, detect_windows_version, release_single_instance, restart_explorer,
+    WindowsVersion,
 };
+use crate::win32_theme::restore_sys_colors;
 
 pub fn run_cli() {
     let args: Vec<String> = env::args().collect();
@@ -70,35 +71,22 @@ pub fn run_cli() {
             };
 
             if win32 {
-                println!("[Win32] Applying theme & system colors in memory...");
+                crate::log_info!("[Win32] Applying theme & system colors in memory...");
                 apply_all_in_memory(&config, win_ver, light_accent);
-                println!("[Win32] Done.");
+                crate::log_info!("[Win32] Done.");
             }
 
             if e11 {
-                if !is_elevated() {
-                    let mut elevated_args = vec!["apply", "--e11-only"];
-                    if force_restart_explorer {
-                        elevated_args.push("--restart-explorer");
-                    }
-                    let color_arg;
-                    if let Some(c) = &custom_color {
-                        color_arg = c.clone();
-                        elevated_args.push("--color");
-                        elevated_args.push(&color_arg);
-                    }
-                    run_elevated_self(&elevated_args);
-                    return;
-                }
-
+                let packages = find_e11_packages();
                 let dark_accent = match &custom_color {
                     Some(hex) => Rgb::from_hex(hex).unwrap_or_else(get_current_dark_system_accent),
                     None => get_current_dark_system_accent(),
                 };
 
-                let packages = find_e11_packages();
                 if !packages.is_empty() {
-                    if let Ok(_) = apply_e11_colorization(&packages, light_accent, dark_accent) {
+                    crate::log_info!("[E11 SVG] Applying icon colors...");
+                    if let Ok(count) = apply_e11_colorization(&packages, light_accent, dark_accent) {
+                        crate::log_info!("[E11 SVG] Patched {} SVG icon(s).", count);
                         if force_restart_explorer {
                             restart_explorer();
                         }
@@ -107,48 +95,49 @@ pub fn run_cli() {
             }
         }
         "revert" | "restore" | "--revert" | "-revert" => {
-            let mut force_restart_explorer = config.restart_explorer;
+            let mut force_restart_explorer = true; // Auto-restart on revert to flush cached icons
             for arg in &args[2..] {
-                if arg.eq_ignore_ascii_case("--restart-explorer") {
-                    force_restart_explorer = true;
+                if arg.eq_ignore_ascii_case("--no-restart-explorer") {
+                    force_restart_explorer = false;
                 }
             }
 
-            if !is_elevated() {
-                let mut elevated_args = vec!["revert"];
-                if force_restart_explorer {
-                    elevated_args.push("--restart-explorer");
-                }
-                run_elevated_self(&elevated_args);
-                return;
-            }
+            crate::log_info!("[Revert] Resetting system and theme colors in memory...");
+            restore_sys_colors();
 
             let packages = find_e11_packages();
-            if let Ok(_) = revert_e11_colorization(&packages) {
-                if force_restart_explorer {
-                    restart_explorer();
-                }
+            crate::log_info!("[Revert] Restoring pristine originals from backup & resetting TrustedInstaller ownership...");
+            if let Ok(count) = revert_e11_colorization(&packages) {
+                crate::log_info!(
+                    "[Revert] Successfully restored {} file(s). TrustedInstaller ownership intact.",
+                    count
+                );
+            }
+
+            if force_restart_explorer {
+                crate::log_info!("[System] Restarting explorer.exe to flush icon cache...");
+                restart_explorer();
             }
         }
         "backup" | "--backup" => {
-            println!("[Backup] Discovering packages...");
+            crate::log_info!("[Backup] Discovering packages...");
             let packages = find_e11_packages();
             let backup_dir = get_backup_root_dir();
-            println!("[Backup] Target backup directory: {}", backup_dir.display());
+            crate::log_info!("[Backup] Target backup directory: {}", backup_dir.display());
             match ensure_backup_created(&packages) {
-                Ok(_) => println!("[Backup] Pristine backup verified/created successfully."),
-                Err(e) => eprintln!("[Backup] Failed to create backup: {}", e),
+                Ok(_) => crate::log_info!("[Backup] Pristine backup verified/created successfully."),
+                Err(e) => crate::log_err!("[Backup] Failed to create backup: {}", e),
             }
         }
         "--init-config" => match create_default_config_file() {
-            Ok(path) => println!("Created config file at: {}", path.display()),
-            Err(e) => eprintln!("Failed to create config file: {}", e),
+            Ok(path) => crate::log_info!("Created config file at: {}", path.display()),
+            Err(e) => crate::log_err!("Failed to create config file: {}", e),
         },
         "--help" | "-h" | "help" | "/?" => {
             print_help();
         }
         cmd => {
-            eprintln!("Unknown command: '{}'. Use --help for usage.", cmd);
+            crate::log_err!("Unknown command: '{}'. Use --help for usage.", cmd);
         }
     }
 }
@@ -158,18 +147,34 @@ fn start_daemon_mode(config: AppConfig, foreground: bool) {
     let mutex = match acquire_single_instance(MUTEX_NAME) {
         Some(m) => m,
         None => {
+            if foreground {
+                unsafe {
+                    if windows_sys::Win32::System::Console::AttachConsole(
+                        windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
+                    ) == 0
+                    {
+                        AllocConsole();
+                    }
+                }
+                crate::log_err!("AccentColorizer daemon is already running in background.");
+            }
             return;
         }
     };
 
     if foreground {
         unsafe {
-            AllocConsole();
+            if windows_sys::Win32::System::Console::AttachConsole(
+                windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
+            ) == 0
+            {
+                AllocConsole();
+            }
         }
-        println!("Starting AccentColorizer in foreground daemon mode...");
+        crate::log_info!("Starting AccentColorizer in foreground daemon mode...");
         let cfg_path = get_config_path();
         if cfg_path.exists() {
-            println!("Loaded config: {}", cfg_path.display());
+            crate::log_info!("Loaded config: {}", cfg_path.display());
         }
     }
 
@@ -196,16 +201,16 @@ Commands:
 
 Options for 'apply':
   --all                 Apply both Win32 memory theme/syscolors and Windows 11 SVG icons
-  --win32-only          Apply only Win32 in-memory theme and system colors (no admin rights needed)
-  --e11-only            Apply only Windows 11 File Explorer SVG icons (requests elevation if needed)
+  --win32-only          Apply only Win32 in-memory theme and system colors
+  --e11-only            Apply only Windows 11 File Explorer SVG icons
   --restart-explorer    Restart explorer.exe after applying
   --color <#RRGGBB>     Override accent color with custom hex code
 
 Options for 'revert':
-  --restart-explorer    Restart explorer.exe after restoring
+  --no-restart-explorer Do not restart explorer.exe after restoring
 
 Storage:
-  The program runs as a single self-contained .exe file.
+  The program runs as a single self-contained .exe file with Administrator privileges.
   The 'backup/' folder is stored in the same directory as AccentColorizer.exe.
 "#
     );

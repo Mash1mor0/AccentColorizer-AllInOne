@@ -1,5 +1,6 @@
 use std::fs;
 use std::io;
+use std::os::windows::fs::MetadataExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -8,6 +9,7 @@ use crate::color::{blend_colors, Rgb};
 use crate::config::get_exe_dir;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x00000400;
 
 const DEFAULT_LIGHT_HEX: &str = "#0078D4";
 const DEFAULT_DARK_HEX: &str = "#4CC2FF";
@@ -118,6 +120,47 @@ pub fn ensure_backup_created(packages: &[DiscoveredPackage]) -> io::Result<()> {
     Ok(())
 }
 
+pub fn is_reparse_point(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|m| (m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+        .unwrap_or(false)
+}
+
+pub fn is_dir_writable(dir: &Path) -> bool {
+    if !dir.exists() {
+        return false;
+    }
+    let test_file = dir.join(".ac_write_test");
+    match fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&test_file)
+    {
+        Ok(_) => {
+            let _ = fs::remove_file(test_file);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn write_file_with_retry(path: &Path, content: &str, retries: u32, delay_ms: u64) -> io::Result<()> {
+    let mut last_err = None;
+    for i in 0..retries {
+        match fs::write(path, content) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = Some(e);
+                if i + 1 < retries {
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap())
+}
+
 pub fn apply_e11_colorization(
     packages: &[DiscoveredPackage],
     light_rgb: Rgb,
@@ -146,12 +189,15 @@ pub fn apply_e11_colorization(
                 continue;
             }
 
-            // Ensure write access to target directory
-            if let Err(_) = take_ownership_and_grant_write(&target_theme_dir) {
-                return Err(format!(
-                    "Permission denied for '{}'. Run with Administrator privileges.",
-                    target_theme_dir.display()
-                ));
+            // Only take ownership & grant write if not already writable!
+            // When Junction is active or permissions exist, takeown/icacls are skipped completely.
+            if !is_dir_writable(&target_theme_dir) {
+                if let Err(_) = take_ownership_and_grant_write(&target_theme_dir) {
+                    return Err(format!(
+                        "Permission denied for '{}'. Run with Administrator privileges.",
+                        target_theme_dir.display()
+                    ));
+                }
             }
 
             if let Ok(files) = fs::read_dir(&backup_theme_dir) {
@@ -166,7 +212,14 @@ pub fn apply_e11_colorization(
 
                     let original_content = match fs::read_to_string(&backup_file_path) {
                         Ok(c) => c,
-                        Err(e) => return Err(format!("Failed to read backup {}: {}", backup_file_path.display(), e)),
+                        Err(e) => {
+                            eprintln!(
+                                "[E11 SVG] Failed to read backup {}: {}",
+                                backup_file_path.display(),
+                                e
+                            );
+                            continue;
+                        }
                     };
 
                     let patched_content = if theme == "light" {
@@ -176,14 +229,15 @@ pub fn apply_e11_colorization(
                         replace_color_ignore_case(&original_content, DEFAULT_DARK_HEX, &target_dark_hex)
                     };
 
-                    match fs::write(&target_file_path, patched_content) {
+                    // Write with 3 retries (50ms interval) to avoid sharing violation locks
+                    match write_file_with_retry(&target_file_path, &patched_content, 3, 50) {
                         Ok(_) => modified_count += 1,
                         Err(e) => {
-                            return Err(format!(
-                                "Failed to write patched file {}: {}",
+                            eprintln!(
+                                "[E11 SVG] Warning: failed to write {}: {}",
                                 target_file_path.display(),
                                 e
-                            ));
+                            );
                         }
                     }
                 }
@@ -204,11 +258,25 @@ pub fn revert_e11_colorization(packages: &[DiscoveredPackage]) -> Result<usize, 
 
     for pkg in packages {
         let pkg_backup_dir = backup_root.join(&pkg.package_name);
+        let target_junction = &pkg.contrast_standard_dir;
+
+        // If junction exists, remove junction link and recreate genuine directory
+        if is_reparse_point(target_junction) {
+            if let Some(parent) = target_junction.parent() {
+                let _ = take_ownership_and_grant_write(parent);
+            }
+            let _ = fs::remove_dir(target_junction);
+            let _ = fs::create_dir_all(target_junction);
+        }
 
         for theme in ["light", "dark"] {
             let target_theme_dir = match get_theme_dir(&pkg.contrast_standard_dir, theme) {
                 Some(dir) => dir,
-                None => continue,
+                None => {
+                    let fallback = pkg.contrast_standard_dir.join(format!("theme-{}", theme));
+                    let _ = fs::create_dir_all(&fallback);
+                    fallback
+                }
             };
             let backup_theme_dir = pkg_backup_dir.join(format!("theme-{}", theme));
 
@@ -238,6 +306,17 @@ pub fn revert_e11_colorization(packages: &[DiscoveredPackage]) -> Result<usize, 
             // Crucial for DISM and SFC: Restore ownership back to TrustedInstaller and reset permissions
             restore_trusted_installer(&target_theme_dir);
         }
+
+        restore_trusted_installer(target_junction);
+        if let Some(parent) = target_junction.parent() {
+            restore_trusted_installer(parent);
+        }
+    }
+
+    // Clean up local contrast-standard storage folder next to exe if left over from previous versions
+    let local_storage = get_exe_dir().join("contrast-standard");
+    if local_storage.exists() {
+        let _ = fs::remove_dir_all(local_storage);
     }
 
     Ok(restored_count)

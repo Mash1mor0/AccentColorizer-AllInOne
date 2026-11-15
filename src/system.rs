@@ -2,10 +2,11 @@ use std::env;
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE,
+    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, SYSTEMTIME,
 };
 use windows_sys::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::System::Threading::{
     CreateMutexW, GetCurrentProcess, OpenProcessToken,
 };
@@ -168,4 +169,26 @@ pub fn restart_explorer() {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn();
+}
+
+pub fn get_timestamp() -> String {
+    unsafe {
+        let mut st: SYSTEMTIME = std::mem::zeroed();
+        GetLocalTime(&mut st);
+        format!("{:02}:{:02}:{:02}", st.wHour, st.wMinute, st.wSecond)
+    }
+}
+
+#[macro_export]
+macro_rules! log_info {
+    ($($arg:tt)*) => {
+        println!("[{}] {}", $crate::system::get_timestamp(), format_args!($($arg)*))
+    };
+}
+
+#[macro_export]
+macro_rules! log_err {
+    ($($arg:tt)*) => {
+        eprintln!("[{}] {}", $crate::system::get_timestamp(), format_args!($($arg)*))
+    };
 }

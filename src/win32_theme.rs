@@ -2,6 +2,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     GetBitmapBits, GetObjectW, GetSysColor, SetBitmapBits, SetSysColors, BITMAP, COLOR_ACTIVECAPTION,
     COLOR_GRADIENTACTIVECAPTION, COLOR_HIGHLIGHT, COLOR_HOTLIGHT, COLOR_MENUHILIGHT, HBITMAP,
 };
+use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::UI::Controls::{CloseThemeData, GetThemeBitmap, OpenThemeData, HTHEME};
 
 use crate::color::{encode_wide, Rgb};
@@ -79,6 +80,41 @@ pub fn modify_sys_colors(accent_h: f64) {
     }
 }
 
+pub fn restore_sys_colors() {
+    let default_colors: [u32; 5] = [
+        Rgb::new(153, 180, 209).to_colorref(), // COLOR_ACTIVECAPTION
+        Rgb::new(185, 209, 234).to_colorref(), // COLOR_GRADIENTACTIVECAPTION
+        Rgb::new(0, 120, 215).to_colorref(),   // COLOR_HIGHLIGHT (Windows Default Blue #0078D7)
+        Rgb::new(0, 102, 204).to_colorref(),   // COLOR_HOTLIGHT
+        Rgb::new(0, 120, 215).to_colorref(),   // COLOR_MENUHILIGHT
+    ];
+
+    unsafe {
+        SetSysColors(
+            SYS_ELEMENTS.len() as i32,
+            SYS_ELEMENTS.as_ptr() as *const i32,
+            default_colors.as_ptr(),
+        );
+    }
+
+    // Reset uxtheme controls (buttons, progress bars, menus) back to default Windows blue hue (207.0 deg)
+    let win_ver = crate::system::detect_windows_version();
+    modify_styles(207.0, win_ver, true, true);
+}
+
+pub fn init_dark_mode() {
+    unsafe {
+        let uxtheme = LoadLibraryW(encode_wide("uxtheme.dll").as_ptr());
+        if !uxtheme.is_null() {
+            if let Some(proc) = GetProcAddress(uxtheme, 135 as *const u8) {
+                let set_preferred_app_mode: unsafe extern "system" fn(i32) -> i32 =
+                    std::mem::transmute(proc);
+                set_preferred_app_mode(1); // AllowDark
+            }
+        }
+    }
+}
+
 struct ThemeSession {
     theme: HTHEME,
 }
@@ -95,6 +131,17 @@ impl ThemeSession {
     }
 
     fn modify_style(&self, part_id: i32, state_id: i32, prop_id: i32, accent_h: f64) -> bool {
+        self.modify_style_ext(part_id, state_id, prop_id, accent_h, false)
+    }
+
+    fn modify_style_ext(
+        &self,
+        part_id: i32,
+        state_id: i32,
+        prop_id: i32,
+        accent_h: f64,
+        tint_gray_fill: bool,
+    ) -> bool {
         let mut hbm: HBITMAP = std::ptr::null_mut();
         let hr = unsafe {
             GetThemeBitmap(
@@ -109,7 +156,7 @@ impl ThemeSession {
         if hr != 0 || hbm.is_null() {
             return false;
         }
-        iterate_bitmap(hbm, accent_h)
+        iterate_bitmap(hbm, accent_h, tint_gray_fill)
     }
 }
 
@@ -124,7 +171,7 @@ impl Drop for ThemeSession {
     }
 }
 
-fn iterate_bitmap(hbm: HBITMAP, accent_h: f64) -> bool {
+fn iterate_bitmap(hbm: HBITMAP, accent_h: f64, tint_gray_fill: bool) -> bool {
     if hbm.is_null() {
         return false;
     }
@@ -153,12 +200,23 @@ fn iterate_bitmap(hbm: HBITMAP, accent_h: f64) -> bool {
 
             let rgb = Rgb::new(r, g, b);
             let mut hsv = rgb.to_hsv();
-            hsv.h = accent_h;
-            let new_rgb = hsv.to_rgb();
 
-            chunk[0] = new_rgb.b;
-            chunk[1] = new_rgb.g;
-            chunk[2] = new_rgb.r;
+            if hsv.s > 0.05 {
+                // Colored pixel (e.g. blue borders, colored checkmarks/arrows) -> shift hue to accent
+                hsv.h = accent_h;
+                let new_rgb = hsv.to_rgb();
+                chunk[0] = new_rgb.b;
+                chunk[1] = new_rgb.g;
+                chunk[2] = new_rgb.r;
+            } else if tint_gray_fill && hsv.v > 0.15 {
+                // Neutral gray fill in Dark Mode selection -> apply subtle accent tint!
+                hsv.h = accent_h;
+                hsv.s = 0.35;
+                let new_rgb = hsv.to_rgb();
+                chunk[0] = new_rgb.b;
+                chunk[1] = new_rgb.g;
+                chunk[2] = new_rgb.r;
+            }
         }
 
         SetBitmapBits(hbm, size as u32, bits.as_ptr() as *const _);
@@ -172,6 +230,8 @@ pub fn modify_styles(
     colorize_menus: bool,
     colorize_progress_bar: bool,
 ) {
+    init_dark_mode();
+
     if let Some(t) = ThemeSession::new(VSCLASS_BUTTON) {
         t.modify_style(BP_PUSHBUTTON, 0, TMT_DIBDATA, accent_h);
         for j in 1..=7 {
@@ -256,7 +316,8 @@ pub fn modify_styles(
     if let Some(t) = ThemeSession::new("Explorer::ListView") {
         for i in 1..=10 {
             for j in 1..=16 {
-                t.modify_style(i, j, TMT_DIBDATA, accent_h);
+                let tint_fill = (i == 1 || i == 6) && (j == 2 || j == 3 || j == 5 || j == 6);
+                t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, tint_fill);
             }
         }
     }
@@ -292,7 +353,8 @@ pub fn modify_styles(
     if let Some(t) = ThemeSession::new("ItemsView::ListView") {
         for i in 1..=16 {
             for j in 1..=16 {
-                t.modify_style(i, j, TMT_DIBDATA, accent_h);
+                let tint_fill = (i == 1 || i == 6) && (j == 2 || j == 3 || j == 5 || j == 6);
+                t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, tint_fill);
             }
         }
         for i in 8..=9 {
@@ -328,6 +390,39 @@ pub fn modify_styles(
         for j in 1..=7 {
             for k in 1..=7 {
                 t.modify_style(4, j, k, accent_h);
+            }
+        }
+    }
+
+    // Windows 10/11 Dark Mode Explorer & ListView controls
+    // In Dark Mode, Explorer uses DarkMode_... theme classes.
+    // Without recoloring these, Dark Mode keeps default blue borders and neutral gray fill.
+    let dark_classes = [
+        "DarkMode_Explorer::ListView",
+        "DarkMode_ItemsView::ListView",
+        "DarkMode_ItemsView",
+        "DarkMode::ListView",
+        "DarkMode_Explorer::TreeView",
+        "DarkMode::TreeView",
+        "DarkMode_Explorer",
+        "DarkMode_Header",
+        "DarkMode_ItemsView::Header",
+    ];
+
+    for cls in dark_classes {
+        if let Some(t) = ThemeSession::new(cls) {
+            for i in 1..=16 {
+                for j in 1..=16 {
+                    let tint_fill = (i == 1 || i == 6) && (j == 2 || j == 3 || j == 5 || j == 6);
+                    t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, tint_fill);
+                }
+            }
+            for i in 8..=9 {
+                for j in 1..=7 {
+                    for k in 1..=7 {
+                        t.modify_style(i, j, k, accent_h);
+                    }
+                }
             }
         }
     }

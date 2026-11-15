@@ -38,7 +38,7 @@ const fn default_false() -> bool {
 }
 
 const fn default_debounce() -> u64 {
-    300
+    150
 }
 
 impl Default for AppConfig {
@@ -49,7 +49,7 @@ impl Default for AppConfig {
             colorize_e11_svg: true,
             restart_explorer: false,
             custom_accent_hex: None,
-            debounce_ms: 300,
+            debounce_ms: 150,
         }
     }
 }
