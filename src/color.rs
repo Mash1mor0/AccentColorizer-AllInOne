@@ -239,3 +239,29 @@ pub fn get_current_dark_system_accent() -> Rgb {
 pub fn encode_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_print_accents() {
+        let imm = get_immersive_color("ImmersiveSystemAccent");
+        println!("Immersive: {:?}", imm);
+        if let Some(c) = imm {
+            println!("Immersive HSV: {:?}", c.to_hsv());
+        }
+        let dwm = get_dwm_accent_color();
+        println!("DWM: {:?}", dwm);
+        if let Some(c) = dwm {
+            println!("DWM HSV: {:?}", c.to_hsv());
+        }
+        let reg = get_registry_accent_color();
+        println!("Registry: {:?}", reg);
+        if let Some(c) = reg {
+            println!("Registry HSV: {:?}", c.to_hsv());
+        }
+        let curr = get_current_system_accent();
+        println!("Current System Accent: {:?}, Hex: {}, HSV: {:?}", curr, curr.to_hex(), curr.to_hsv());
+    }
+}

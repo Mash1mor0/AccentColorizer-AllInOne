@@ -207,6 +207,10 @@ fn iterate_bitmap(hbm: HBITMAP, accent_h: f64, tint_gray_fill: bool) -> bool {
             let r = chunk[2];
             let a = chunk[3];
 
+            if a == 0 {
+                continue;
+            }
+
             let rgb = Rgb::new(r, g, b);
             let mut hsv = rgb.to_hsv();
 
@@ -214,10 +218,11 @@ fn iterate_bitmap(hbm: HBITMAP, accent_h: f64, tint_gray_fill: bool) -> bool {
                 // Colored pixel (e.g. blue borders, colored checkmarks/arrows) -> shift hue to accent
                 hsv.h = accent_h;
                 let new_rgb = hsv.to_rgb();
-                chunk[0] = new_rgb.b;
-                chunk[1] = new_rgb.g;
-                chunk[2] = new_rgb.r;
-            } else if tint_gray_fill && a > 0 {
+                // Ensure premultiplied alpha: RGB cannot exceed Alpha in 32-bit PARGB bitmaps
+                chunk[0] = new_rgb.b.min(a);
+                chunk[1] = new_rgb.g.min(a);
+                chunk[2] = new_rgb.r.min(a);
+            } else if tint_gray_fill {
                 if hsv.v > 0.15 {
                     // Dark Mode neutral gray / white in selection or focus outline -> apply accent!
                     hsv.h = accent_h;
@@ -229,9 +234,9 @@ fn iterate_bitmap(hbm: HBITMAP, accent_h: f64, tint_gray_fill: bool) -> bool {
                         hsv.s = 0.35;
                     }
                     let new_rgb = hsv.to_rgb();
-                    chunk[0] = new_rgb.b;
-                    chunk[1] = new_rgb.g;
-                    chunk[2] = new_rgb.r;
+                    chunk[0] = new_rgb.b.min(a);
+                    chunk[1] = new_rgb.g.min(a);
+                    chunk[2] = new_rgb.r.min(a);
                 } else {
                     // Light Mode translucent black/dark pixels (unfocused selection, focus rectangle):
                     // Premultiply base accent RGB by pixel alpha!
