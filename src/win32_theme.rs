@@ -159,6 +159,30 @@ impl ThemeSession {
         }
         iterate_bitmap(hbm, accent_h, tint_gray_fill)
     }
+
+    fn modify_style_light_pargb(
+        &self,
+        part_id: i32,
+        state_id: i32,
+        prop_id: i32,
+        base_accent: Rgb,
+    ) -> bool {
+        let mut hbm: HBITMAP = std::ptr::null_mut();
+        let hr = unsafe {
+            GetThemeBitmap(
+                self.theme,
+                part_id,
+                state_id,
+                prop_id,
+                GBF_DIRECT,
+                &mut hbm,
+            )
+        };
+        if hr != 0 || hbm.is_null() {
+            return false;
+        }
+        iterate_light_pargb_bitmap(hbm, base_accent)
+    }
 }
 
 impl Drop for ThemeSession {
@@ -306,6 +330,76 @@ pub fn restore_header_dividers() {
 
     // 3. Return to AllowDark (1) for standard dark mode operation
     set_preferred_app_mode(1); // AllowDark
+}
+
+fn iterate_light_pargb_bitmap(hbm: HBITMAP, base_accent: Rgb) -> bool {
+    if hbm.is_null() {
+        return false;
+    }
+
+    unsafe {
+        let mut bm: BITMAP = std::mem::zeroed();
+        let ret = GetObjectW(
+            hbm as *mut _,
+            std::mem::size_of::<BITMAP>() as i32,
+            &mut bm as *mut _ as *mut _,
+        );
+        if ret == 0 || bm.bmBitsPixel != 32 || bm.bmWidth <= 0 || bm.bmHeight <= 0 {
+            return false;
+        }
+
+        let size = (bm.bmWidth as usize) * (bm.bmHeight as usize) * 4;
+        let mut bits = vec![0u8; size];
+        if GetBitmapBits(hbm, size as i32, bits.as_mut_ptr() as *mut _) == 0 {
+            return false;
+        }
+
+        for chunk in bits.chunks_exact_mut(4) {
+            let a = chunk[3];
+            if a > 0 {
+                chunk[0] = ((base_accent.b as u32 * a as u32) / 255) as u8;
+                chunk[1] = ((base_accent.g as u32 * a as u32) / 255) as u8;
+                chunk[2] = ((base_accent.r as u32 * a as u32) / 255) as u8;
+            }
+        }
+
+        SetBitmapBits(hbm, size as u32, bits.as_ptr() as *const _);
+        true
+    }
+}
+
+fn recolor_light_explorer_classes(base_accent: Rgb) {
+    if let Some(t) = ThemeSession::new("Explorer::TreeView") {
+        for i in 1..=6 {
+            for j in 1..=16 {
+                t.modify_style_light_pargb(i, j, TMT_DIBDATA, base_accent);
+            }
+        }
+    }
+
+    if let Some(t) = ThemeSession::new("Explorer::ListView") {
+        for i in [1, 6] {
+            for j in 1..=16 {
+                t.modify_style_light_pargb(i, j, TMT_DIBDATA, base_accent);
+            }
+        }
+    }
+
+    if let Some(t) = ThemeSession::new("ItemsView") {
+        for i in [1, 3, 6] {
+            for j in 0..=16 {
+                t.modify_style_light_pargb(i, j, TMT_DIBDATA, base_accent);
+            }
+        }
+    }
+
+    if let Some(t) = ThemeSession::new("ItemsView::ListView") {
+        for i in [1, 6] {
+            for j in 1..=16 {
+                t.modify_style_light_pargb(i, j, TMT_DIBDATA, base_accent);
+            }
+        }
+    }
 }
 
 fn recolor_explorer_classes(accent_h: f64) {
@@ -466,9 +560,16 @@ pub fn modify_styles(
         }
     }
 
+    let base_accent = crate::color::Hsv {
+        h: accent_h,
+        s: 1.0,
+        v: 0.83,
+    }
+    .to_rgb();
+
     // 1. Recolor Explorer selection & focus controls under ForceLight (Light Mode)
     set_preferred_app_mode(3); // ForceLight
-    recolor_explorer_classes(accent_h);
+    recolor_light_explorer_classes(base_accent);
 
     // 2. Recolor Explorer selection & focus controls under ForceDark (Dark Mode)
     set_preferred_app_mode(2); // ForceDark
