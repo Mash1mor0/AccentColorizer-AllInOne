@@ -194,10 +194,18 @@ fn iterate_bitmap(hbm: HBITMAP, accent_h: f64, tint_gray_fill: bool) -> bool {
             return false;
         }
 
+        let base_accent_rgb = crate::color::Hsv {
+            h: accent_h,
+            s: 1.0,
+            v: 0.85,
+        }
+        .to_rgb();
+
         for chunk in bits.chunks_exact_mut(4) {
             let b = chunk[0];
             let g = chunk[1];
             let r = chunk[2];
+            let a = chunk[3];
 
             let rgb = Rgb::new(r, g, b);
             let mut hsv = rgb.to_hsv();
@@ -209,20 +217,28 @@ fn iterate_bitmap(hbm: HBITMAP, accent_h: f64, tint_gray_fill: bool) -> bool {
                 chunk[0] = new_rgb.b;
                 chunk[1] = new_rgb.g;
                 chunk[2] = new_rgb.r;
-            } else if tint_gray_fill && hsv.v > 0.15 {
-                // Neutral gray / white in Dark Mode selection or focus outline -> apply accent!
-                hsv.h = accent_h;
-                if hsv.v >= 0.40 {
-                    // Border / focus rectangle outline: vibrant accent!
-                    hsv.s = 0.75;
+            } else if tint_gray_fill && a > 0 {
+                if hsv.v > 0.15 {
+                    // Dark Mode neutral gray / white in selection or focus outline -> apply accent!
+                    hsv.h = accent_h;
+                    if hsv.v >= 0.40 {
+                        // Border / focus rectangle outline: vibrant accent!
+                        hsv.s = 0.75;
+                    } else {
+                        // Interior fill: subtle tint
+                        hsv.s = 0.35;
+                    }
+                    let new_rgb = hsv.to_rgb();
+                    chunk[0] = new_rgb.b;
+                    chunk[1] = new_rgb.g;
+                    chunk[2] = new_rgb.r;
                 } else {
-                    // Interior fill: subtle tint
-                    hsv.s = 0.35;
+                    // Light Mode translucent black/dark pixels (unfocused selection, focus rectangle):
+                    // Premultiply base accent RGB by pixel alpha!
+                    chunk[0] = ((base_accent_rgb.b as u32 * a as u32) / 255) as u8;
+                    chunk[1] = ((base_accent_rgb.g as u32 * a as u32) / 255) as u8;
+                    chunk[2] = ((base_accent_rgb.r as u32 * a as u32) / 255) as u8;
                 }
-                let new_rgb = hsv.to_rgb();
-                chunk[0] = new_rgb.b;
-                chunk[1] = new_rgb.g;
-                chunk[2] = new_rgb.r;
             }
         }
 
@@ -285,6 +301,72 @@ pub fn restore_header_dividers() {
 
     // 3. Return to AllowDark (1) for standard dark mode operation
     set_preferred_app_mode(1); // AllowDark
+}
+
+fn recolor_explorer_classes(accent_h: f64) {
+    if let Some(t) = ThemeSession::new("Explorer::TreeView") {
+        for i in 1..=6 {
+            for j in 1..=16 {
+                let tint_fill = i == 1 || i == 6;
+                t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, tint_fill);
+            }
+        }
+        for j in 1..=7 {
+            for k in 1..=7 {
+                t.modify_style(4, j, k, accent_h);
+            }
+        }
+    }
+
+    if let Some(t) = ThemeSession::new("Explorer::ListView") {
+        for i in 1..=10 {
+            for j in 1..=16 {
+                let tint_fill = i == 1 || i == 6;
+                t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, tint_fill);
+            }
+        }
+        for i in 8..=9 {
+            for j in 1..=7 {
+                for k in 1..=7 {
+                    t.modify_style(i, j, k, accent_h);
+                }
+            }
+        }
+    }
+
+    if let Some(t) = ThemeSession::new("ItemsView") {
+        for i in 1..=10 {
+            for j in 0..=16 {
+                t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, true);
+            }
+        }
+    }
+
+    if let Some(t) = ThemeSession::new("ItemsView::ListView") {
+        for i in 1..=16 {
+            for j in 1..=16 {
+                let tint_fill = i == 1 || i == 6;
+                t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, tint_fill);
+            }
+        }
+        for i in 8..=9 {
+            for j in 1..=7 {
+                for k in 1..=7 {
+                    t.modify_style(i, j, k, accent_h);
+                }
+            }
+        }
+    }
+
+    if let Some(t) = ThemeSession::new("ListView") {
+        for i in 8..=9 {
+            for j in 1..=7 {
+                for k in 1..=7 {
+                    t.modify_style(i, j, k, accent_h);
+                }
+            }
+        }
+    }
 }
 
 pub fn modify_styles(
@@ -366,23 +448,6 @@ pub fn modify_styles(
         t.modify_style(1, 0, TMT_DIBDATA, accent_h);
     }
 
-    if let Some(t) = ThemeSession::new("Explorer::TreeView") {
-        for i in 1..=6 {
-            for j in 1..=2 {
-                t.modify_style(i, j, TMT_DIBDATA, accent_h);
-            }
-        }
-    }
-
-    if let Some(t) = ThemeSession::new("Explorer::ListView") {
-        for i in 1..=10 {
-            for j in 1..=16 {
-                let tint_fill = i == 1 || i == 6;
-                t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, tint_fill);
-            }
-        }
-    }
-
     if let Some(t) = ThemeSession::new("PreviewPane") {
         t.modify_style(1, 1, TMT_DIBDATA, accent_h);
     }
@@ -396,70 +461,20 @@ pub fn modify_styles(
         }
     }
 
-    if let Some(t) = ThemeSession::new("ItemsView") {
-        for i in 1..=10 {
-            for j in 0..=16 {
-                t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, true);
-            }
-        }
-    }
+    // 1. Recolor Explorer selection & focus controls under ForceLight (Light Mode)
+    set_preferred_app_mode(3); // ForceLight
+    recolor_explorer_classes(accent_h);
 
-    if let Some(t) = ThemeSession::new("ItemsView::ListView") {
-        for i in 1..=16 {
-            for j in 1..=16 {
-                let tint_fill = i == 1 || i == 6;
-                t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, tint_fill);
-            }
-        }
-        for i in 8..=9 {
-            for j in 1..=7 {
-                for k in 1..=7 {
-                    t.modify_style(i, j, k, accent_h);
-                }
-            }
-        }
-    }
+    // 2. Recolor Explorer selection & focus controls under ForceDark (Dark Mode)
+    set_preferred_app_mode(2); // ForceDark
+    recolor_explorer_classes(accent_h);
 
-    if let Some(t) = ThemeSession::new("ListView") {
-        for i in 8..=9 {
-            for j in 1..=7 {
-                for k in 1..=7 {
-                    t.modify_style(i, j, k, accent_h);
-                }
-            }
-        }
-    }
-
-    if let Some(t) = ThemeSession::new("Explorer::ListView") {
-        for i in 8..=9 {
-            for j in 1..=7 {
-                for k in 1..=7 {
-                    t.modify_style(i, j, k, accent_h);
-                }
-            }
-        }
-    }
-
-    if let Some(t) = ThemeSession::new("Explorer::TreeView") {
-        for j in 1..=7 {
-            for k in 1..=7 {
-                t.modify_style(4, j, k, accent_h);
-            }
-        }
-    }
-
-    // Windows 10/11 Dark Mode Explorer & ListView controls
-    // In Dark Mode, Explorer uses DarkMode_... theme classes.
-    // Without recoloring these, Dark Mode keeps default blue borders and neutral gray fill.
-    // Note: DarkMode_Header and DarkMode_ItemsView::Header are omitted so column divider lines remain default neutral gray.
     let dark_classes = [
         "DarkMode_Explorer::ListView",
         "DarkMode_ItemsView::ListView",
-        "DarkMode_ItemsView",
         "DarkMode::ListView",
         "DarkMode_Explorer::TreeView",
         "DarkMode::TreeView",
-        "DarkMode_Explorer",
     ];
 
     for cls in dark_classes {
@@ -479,6 +494,8 @@ pub fn modify_styles(
             }
         }
     }
+
+    set_preferred_app_mode(1); // AllowDark
 
     if let Some(t) = ThemeSession::new("BB::Toolbar") {
         for i in 1..=4 {
