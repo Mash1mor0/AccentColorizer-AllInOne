@@ -42,8 +42,6 @@ const VSCLASS_SPIN: &str = "Spin";
 const SPNP_UP: i32 = 1;
 const SPNP_DOWNHORZ: i32 = 4;
 
-const VSCLASS_HEADERSTYLE: &str = "Header";
-const HP_HEADERITEM: i32 = 1;
 
 const TP_BUTTON: i32 = 1;
 const TP_SPLITBUTTONDROPDOWN: i32 = 6;
@@ -102,17 +100,20 @@ pub fn restore_sys_colors() {
     modify_styles(207.0, win_ver, true, true);
 }
 
-pub fn init_dark_mode() {
+pub fn set_preferred_app_mode(mode: i32) {
     unsafe {
         let uxtheme = LoadLibraryW(encode_wide("uxtheme.dll").as_ptr());
         if !uxtheme.is_null() {
             if let Some(proc) = GetProcAddress(uxtheme, 135 as *const u8) {
-                let set_preferred_app_mode: unsafe extern "system" fn(i32) -> i32 =
-                    std::mem::transmute(proc);
-                set_preferred_app_mode(1); // AllowDark
+                let func: unsafe extern "system" fn(i32) -> i32 = std::mem::transmute(proc);
+                func(mode);
             }
         }
     }
+}
+
+pub fn init_dark_mode() {
+    set_preferred_app_mode(1); // AllowDark
 }
 
 struct ThemeSession {
@@ -209,9 +210,15 @@ fn iterate_bitmap(hbm: HBITMAP, accent_h: f64, tint_gray_fill: bool) -> bool {
                 chunk[1] = new_rgb.g;
                 chunk[2] = new_rgb.r;
             } else if tint_gray_fill && hsv.v > 0.15 {
-                // Neutral gray fill in Dark Mode selection -> apply subtle accent tint!
+                // Neutral gray / white in Dark Mode selection or focus outline -> apply accent!
                 hsv.h = accent_h;
-                hsv.s = 0.35;
+                if hsv.v >= 0.40 {
+                    // Border / focus rectangle outline: vibrant accent!
+                    hsv.s = 0.75;
+                } else {
+                    // Interior fill: subtle tint
+                    hsv.s = 0.35;
+                }
                 let new_rgb = hsv.to_rgb();
                 chunk[0] = new_rgb.b;
                 chunk[1] = new_rgb.g;
@@ -224,6 +231,62 @@ fn iterate_bitmap(hbm: HBITMAP, accent_h: f64, tint_gray_fill: bool) -> bool {
     }
 }
 
+fn set_class_dividers(cls: &str, divider_val: u8) {
+    if let Some(t) = ThemeSession::new(cls) {
+        for s in 0..=16 {
+            let mut hbm: HBITMAP = std::ptr::null_mut();
+            let hr = unsafe {
+                GetThemeBitmap(t.theme, 1, s, TMT_DIBDATA, GBF_DIRECT, &mut hbm)
+            };
+            if hr == 0 && !hbm.is_null() {
+                unsafe {
+                    let mut bm: BITMAP = std::mem::zeroed();
+                    if GetObjectW(
+                        hbm as *mut _,
+                        std::mem::size_of::<BITMAP>() as i32,
+                        &mut bm as *mut _ as *mut _,
+                    ) != 0
+                        && bm.bmBitsPixel == 32
+                        && bm.bmWidth > 0
+                        && bm.bmHeight > 0
+                    {
+                        let size = (bm.bmWidth as usize) * (bm.bmHeight as usize) * 4;
+                        let mut bits = vec![0u8; size];
+                        if GetBitmapBits(hbm, size as i32, bits.as_mut_ptr() as *mut _) != 0 {
+                            let divider_x = (bm.bmWidth - 1) as usize;
+                            for y in 0..(bm.bmHeight as usize) {
+                                let idx = (y * (bm.bmWidth as usize) + divider_x) * 4;
+                                bits[idx] = divider_val;
+                                bits[idx + 1] = divider_val;
+                                bits[idx + 2] = divider_val;
+                                bits[idx + 3] = 0xFF;
+                            }
+                            SetBitmapBits(hbm, size as u32, bits.as_ptr() as *const _);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn restore_header_dividers() {
+    // 1. Force Light mode to access and restore Light theme headers to default #E5E5E5
+    set_preferred_app_mode(3); // ForceLight
+    set_class_dividers("ItemsView::Header", 0xE5);
+    set_class_dividers("Header", 0xE5);
+
+    // 2. Force Dark mode to access and restore Dark theme headers to default #636363
+    set_preferred_app_mode(2); // ForceDark
+    set_class_dividers("DarkMode_ItemsView::Header", 0x63);
+    set_class_dividers("DarkMode_Header", 0x63);
+    set_class_dividers("ItemsView::Header", 0x63);
+    set_class_dividers("Header", 0x63);
+
+    // 3. Return to AllowDark (1) for standard dark mode operation
+    set_preferred_app_mode(1); // AllowDark
+}
+
 pub fn modify_styles(
     accent_h: f64,
     win_ver: WindowsVersion,
@@ -231,6 +294,7 @@ pub fn modify_styles(
     colorize_progress_bar: bool,
 ) {
     init_dark_mode();
+    restore_header_dividers();
 
     if let Some(t) = ThemeSession::new(VSCLASS_BUTTON) {
         t.modify_style(BP_PUSHBUTTON, 0, TMT_DIBDATA, accent_h);
@@ -281,9 +345,6 @@ pub fn modify_styles(
         }
     }
 
-    if let Some(t) = ThemeSession::new(VSCLASS_HEADERSTYLE) {
-        t.modify_style(HP_HEADERITEM, 0, TMT_DIBDATA, accent_h);
-    }
 
     // Toolbars
     let toolbars = [
@@ -316,7 +377,7 @@ pub fn modify_styles(
     if let Some(t) = ThemeSession::new("Explorer::ListView") {
         for i in 1..=10 {
             for j in 1..=16 {
-                let tint_fill = (i == 1 || i == 6) && (j == 2 || j == 3 || j == 5 || j == 6);
+                let tint_fill = i == 1 || i == 6;
                 t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, tint_fill);
             }
         }
@@ -336,16 +397,9 @@ pub fn modify_styles(
     }
 
     if let Some(t) = ThemeSession::new("ItemsView") {
-        for i in 1..=7 {
-            t.modify_style(3, i, TMT_DIBDATA, accent_h);
-        }
-    }
-
-    if let Some(t) = ThemeSession::new("ItemsView::Header") {
-        t.modify_style(1, 0, TMT_DIBDATA, accent_h);
-        for i in 1..=16 {
-            for j in 1..=16 {
-                t.modify_style(i, j, TMT_DIBDATA, accent_h);
+        for i in 1..=10 {
+            for j in 0..=16 {
+                t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, true);
             }
         }
     }
@@ -353,7 +407,7 @@ pub fn modify_styles(
     if let Some(t) = ThemeSession::new("ItemsView::ListView") {
         for i in 1..=16 {
             for j in 1..=16 {
-                let tint_fill = (i == 1 || i == 6) && (j == 2 || j == 3 || j == 5 || j == 6);
+                let tint_fill = i == 1 || i == 6;
                 t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, tint_fill);
             }
         }
@@ -397,6 +451,7 @@ pub fn modify_styles(
     // Windows 10/11 Dark Mode Explorer & ListView controls
     // In Dark Mode, Explorer uses DarkMode_... theme classes.
     // Without recoloring these, Dark Mode keeps default blue borders and neutral gray fill.
+    // Note: DarkMode_Header and DarkMode_ItemsView::Header are omitted so column divider lines remain default neutral gray.
     let dark_classes = [
         "DarkMode_Explorer::ListView",
         "DarkMode_ItemsView::ListView",
@@ -405,15 +460,13 @@ pub fn modify_styles(
         "DarkMode_Explorer::TreeView",
         "DarkMode::TreeView",
         "DarkMode_Explorer",
-        "DarkMode_Header",
-        "DarkMode_ItemsView::Header",
     ];
 
     for cls in dark_classes {
         if let Some(t) = ThemeSession::new(cls) {
             for i in 1..=16 {
                 for j in 1..=16 {
-                    let tint_fill = (i == 1 || i == 6) && (j == 2 || j == 3 || j == 5 || j == 6);
+                    let tint_fill = i == 1 || i == 6;
                     t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, tint_fill);
                 }
             }
@@ -469,9 +522,6 @@ pub fn modify_styles(
         t.modify_style(8, 0, TMT_DIBDATA, accent_h);
     }
 
-    if let Some(t) = ThemeSession::new("Header") {
-        t.modify_style(1, 0, TMT_DIBDATA, accent_h);
-    }
 
     if let Some(t) = ThemeSession::new("PAUSE") {
         for j in 1..=7 {
@@ -665,4 +715,6 @@ pub fn modify_styles(
             }
         }
     }
+
+    restore_header_dividers();
 }
