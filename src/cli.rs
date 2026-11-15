@@ -136,6 +136,9 @@ pub fn run_cli() {
         "--help" | "-h" | "help" | "/?" => {
             print_help();
         }
+        "--version" | "-v" => {
+            println!("AccentColorizer v{}", env!("CARGO_PKG_VERSION"));
+        }
         cmd => {
             crate::log_err!("Unknown command: '{}'. Use --help for usage.", cmd);
         }
