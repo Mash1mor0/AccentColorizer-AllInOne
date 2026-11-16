@@ -8,6 +8,7 @@ mod color;
 mod config;
 mod e11_svg;
 mod listener;
+mod security;
 mod system;
 mod win32_theme;
 

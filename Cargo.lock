@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "AccentColorizer-AllInOne-Rust"
+name = "AccentColorizer-AllInOne"
 version = "0.8.5"
 dependencies = [
  "serde",

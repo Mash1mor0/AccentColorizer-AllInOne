@@ -1,14 +1,11 @@
 use std::fs;
 use std::io;
 use std::os::windows::fs::MetadataExt;
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use crate::color::{blend_colors, Rgb};
 use crate::config::get_exe_dir;
 
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x00000400;
 
 const DEFAULT_LIGHT_HEX: &str = "#0078D4";
@@ -151,6 +148,9 @@ fn write_file_with_retry(path: &Path, content: &str, retries: u32, delay_ms: u64
         match fs::write(path, content) {
             Ok(()) => return Ok(()),
             Err(e) => {
+                if e.kind() == io::ErrorKind::PermissionDenied {
+                    let _ = crate::security::take_ownership_and_grant_admin(path);
+                }
                 last_err = Some(e);
                 if i + 1 < retries {
                     std::thread::sleep(std::time::Duration::from_millis(delay_ms));
@@ -189,13 +189,13 @@ pub fn apply_e11_colorization(
                 continue;
             }
 
-            // Only take ownership & grant write if not already writable!
-            // When Junction is active or permissions exist, takeown/icacls are skipped completely.
+            // Ensure write access recursively to directory and all files inside
             if !is_dir_writable(&target_theme_dir) {
-                if let Err(_) = take_ownership_and_grant_write(&target_theme_dir) {
+                if let Err(e) = crate::security::take_ownership_and_grant_admin_recursive(&target_theme_dir) {
                     return Err(format!(
-                        "Permission denied for '{}'. Run with Administrator privileges.",
-                        target_theme_dir.display()
+                        "Permission denied for '{}': {}. Run with Administrator privileges.",
+                        target_theme_dir.display(),
+                        e
                     ));
                 }
             }
@@ -263,7 +263,7 @@ pub fn revert_e11_colorization(packages: &[DiscoveredPackage]) -> Result<usize, 
         // If junction exists, remove junction link and recreate genuine directory
         if is_reparse_point(target_junction) {
             if let Some(parent) = target_junction.parent() {
-                let _ = take_ownership_and_grant_write(parent);
+                let _ = crate::security::take_ownership_and_grant_admin(parent);
             }
             let _ = fs::remove_dir(target_junction);
             let _ = fs::create_dir_all(target_junction);
@@ -285,7 +285,7 @@ pub fn revert_e11_colorization(packages: &[DiscoveredPackage]) -> Result<usize, 
             }
 
             // Ensure write access to restore files
-            let _ = take_ownership_and_grant_write(&target_theme_dir);
+            let _ = crate::security::take_ownership_and_grant_admin_recursive(&target_theme_dir);
 
             if let Ok(files) = fs::read_dir(&backup_theme_dir) {
                 for file_entry in files.flatten() {
@@ -297,19 +297,24 @@ pub fn revert_e11_colorization(packages: &[DiscoveredPackage]) -> Result<usize, 
                         continue;
                     }
 
-                    if fs::copy(&backup_file_path, &target_file_path).is_ok() {
+                    if fs::copy(&backup_file_path, &target_file_path).is_err() {
+                        let _ = crate::security::take_ownership_and_grant_admin(&target_file_path);
+                        if fs::copy(&backup_file_path, &target_file_path).is_ok() {
+                            restored_count += 1;
+                        }
+                    } else {
                         restored_count += 1;
                     }
                 }
             }
 
             // Crucial for DISM and SFC: Restore ownership back to TrustedInstaller and reset permissions
-            restore_trusted_installer(&target_theme_dir);
+            crate::security::restore_trusted_installer_recursive(&target_theme_dir);
         }
 
-        restore_trusted_installer(target_junction);
+        let _ = crate::security::restore_trusted_installer(target_junction);
         if let Some(parent) = target_junction.parent() {
-            restore_trusted_installer(parent);
+            let _ = crate::security::restore_trusted_installer(parent);
         }
     }
 
@@ -327,75 +332,4 @@ fn replace_color_ignore_case(src: &str, old_hex: &str, new_hex: &str) -> String 
     let old_lower = old_hex.to_ascii_lowercase();
 
     src.replace(&old_upper, new_hex).replace(&old_lower, new_hex)
-}
-
-fn take_ownership_and_grant_write(dir: &Path) -> Result<(), io::Error> {
-    let path_str = dir.to_string_lossy();
-
-    // takeown /F "path" /R /D Y
-    let _ = Command::new("takeown.exe")
-        .args(["/F", &path_str, "/R", "/D", "Y"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-
-    // icacls "path" /grant *S-1-5-32-544:F /T /C /Q (Administrators group SID)
-    // and *S-1-5-11:F (Authenticated Users SID)
-    let status = Command::new("icacls.exe")
-        .args([&path_str, "/grant", "*S-1-5-32-544:F", "/T", "/C", "/Q"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-
-    let _ = Command::new("icacls.exe")
-        .args([&path_str, "/grant", "*S-1-5-11:F", "/T", "/C", "/Q"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-
-    if !status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Failed to grant write permissions",
-        ));
-    }
-
-    Ok(())
-}
-
-fn restore_trusted_installer(dir: &Path) {
-    let path_str = dir.to_string_lossy();
-
-    // Set owner back to TrustedInstaller:
-    // icacls "path" /setowner "NT SERVICE\TrustedInstaller" /T /C /Q
-    let _ = Command::new("icacls.exe")
-        .args([
-            &path_str,
-            "/setowner",
-            "NT SERVICE\\TrustedInstaller",
-            "/T",
-            "/C",
-            "/Q",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-
-    // Reset ACLs back to inheritance:
-    // icacls "path" /reset /T /C /Q
-    let _ = Command::new("icacls.exe")
-        .args([&path_str, "/reset", "/T", "/C", "/Q"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
 }
