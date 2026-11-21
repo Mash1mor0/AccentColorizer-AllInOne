@@ -3,10 +3,7 @@ use windows_sys::Win32::System::Console::AllocConsole;
 
 use crate::color::{get_current_dark_system_accent, get_current_system_accent, Rgb};
 use crate::config::{create_default_config_file, get_config_path, load_config, AppConfig};
-use crate::e11_svg::{
-    apply_e11_colorization, ensure_backup_created, find_e11_packages, get_backup_root_dir,
-    revert_e11_colorization,
-};
+use crate::e11_svg::{apply_e11_colorization, find_e11_packages, revert_e11_colorization};
 use crate::listener::{apply_all_in_memory, run_listener};
 use crate::system::{
     acquire_single_instance, detect_windows_version, release_single_instance, restart_explorer,
@@ -110,7 +107,7 @@ pub fn run_cli() {
             restore_sys_colors();
 
             let packages = find_e11_packages();
-            crate::log_info!("[Revert] Restoring pristine originals from backup & resetting TrustedInstaller ownership...");
+            crate::log_info!("[Revert] Restoring pristine originals (.original) & resetting TrustedInstaller ownership...");
             if let Ok(count) = revert_e11_colorization(&packages) {
                 crate::log_info!(
                     "[Revert] Successfully restored {} file(s). TrustedInstaller ownership intact.",
@@ -121,16 +118,6 @@ pub fn run_cli() {
             if force_restart_explorer {
                 crate::log_info!("[System] Restarting explorer.exe to flush icon cache...");
                 restart_explorer();
-            }
-        }
-        "backup" | "--backup" => {
-            crate::log_info!("[Backup] Discovering packages...");
-            let packages = find_e11_packages();
-            let backup_dir = get_backup_root_dir();
-            crate::log_info!("[Backup] Target backup directory: {}", backup_dir.display());
-            match ensure_backup_created(&packages) {
-                Ok(_) => crate::log_info!("[Backup] Pristine backup verified/created successfully."),
-                Err(e) => crate::log_err!("[Backup] Failed to create backup: {}", e),
             }
         }
         "--init-config" => match create_default_config_file() {
@@ -201,8 +188,7 @@ Usage:
 Commands:
   daemon [--foreground] Run background resident listener (default mode when no command specified)
   apply                 Apply accent colors immediately
-  revert, restore       Restore original untouched SVGs from backup and restore TrustedInstaller ownership (DISM/SFC safe)
-  backup                Create pristine backup of Windows 11 Explorer SVG icons without modifying anything
+  revert, restore       Restore pristine originals (.original) and restore TrustedInstaller ownership (DISM/SFC safe)
   --init-config         Generate default config.toml file next to executable (optional)
   --help, -h            Show this help message
 
@@ -218,7 +204,7 @@ Options for 'revert':
 
 Storage:
   The program runs as a single self-contained .exe file with Administrator privileges.
-  The 'backup/' folder is stored in the same directory as AccentColorizer.exe.
+  Patched SVG icons are linked via NTFS junction to 'contrast-standard/' in the exe directory.
 "#
     );
 }

@@ -36,10 +36,6 @@ struct SvgTemplate {
 
 static TEMPLATES: Mutex<Option<HashMap<String, Vec<SvgTemplate>>>> = Mutex::new(None);
 
-pub fn get_backup_root_dir() -> PathBuf {
-    get_exe_dir().join("backup")
-}
-
 pub fn is_reparse_point(path: &Path) -> bool {
     fs::symlink_metadata(path)
         .map(|m| (m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
@@ -148,25 +144,6 @@ fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub fn ensure_backup_created(packages: &[DiscoveredPackage]) -> io::Result<()> {
-    let backup_root = get_backup_root_dir();
-
-    for pkg in packages {
-        let pkg_backup_dir = backup_root.join(&pkg.package_name);
-        let src_root = if pkg.genuine_orig_dir.exists() {
-            &pkg.genuine_orig_dir
-        } else {
-            &pkg.contrast_standard_dir
-        };
-
-        if src_root.exists() && (!pkg_backup_dir.exists() || !pkg_backup_dir.join("theme-light").exists()) {
-            copy_dir_all(src_root, &pkg_backup_dir)?;
-        }
-    }
-
-    Ok(())
-}
-
 pub fn ensure_junction_setup(pkg: &DiscoveredPackage) -> Result<PathBuf, String> {
     let local_storage = get_exe_dir()
         .join("contrast-standard")
@@ -176,16 +153,10 @@ pub fn ensure_junction_setup(pkg: &DiscoveredPackage) -> Result<PathBuf, String>
     if !pkg.genuine_orig_dir.exists() {
         if pkg.contrast_standard_dir.exists() {
             if is_reparse_point(&pkg.contrast_standard_dir) {
-                // If already junction, restore genuine_orig_dir from backup folder if possible
-                let backup_dir = get_backup_root_dir().join(&pkg.package_name);
-                if backup_dir.exists() {
-                    let _ = copy_dir_all(&backup_dir, &pkg.genuine_orig_dir);
-                } else {
-                    return Err(format!(
-                        "contrast-standard is already a junction, but '{}' is missing.",
-                        pkg.genuine_orig_dir.display()
-                    ));
-                }
+                return Err(format!(
+                    "contrast-standard is already a junction, but genuine original '{}' is missing.",
+                    pkg.genuine_orig_dir.display()
+                ));
             } else {
                 // contrast_standard_dir is the genuine factory folder
                 let _ = crate::security::take_ownership_and_grant_admin(&pkg.images_dir);
@@ -194,17 +165,9 @@ pub fn ensure_junction_setup(pkg: &DiscoveredPackage) -> Result<PathBuf, String>
                     .map_err(|e| format!("Failed to rename genuine directory to .original: {}", e))?;
             }
         } else {
-            let backup_dir = get_backup_root_dir().join(&pkg.package_name);
-            if backup_dir.exists() {
-                let _ = copy_dir_all(&backup_dir, &pkg.genuine_orig_dir);
-            } else {
-                return Err("Neither contrast-standard nor contrast-standard.original found.".to_string());
-            }
+            return Err("Neither contrast-standard nor contrast-standard.original found.".to_string());
         }
     }
-
-    // Also ensure external backup is preserved in backup/
-    let _ = ensure_backup_created(std::slice::from_ref(pkg));
 
     // 2. Ensure local_storage exists and has initial copy of files
     let theme_light_local = local_storage.join("theme-light");
