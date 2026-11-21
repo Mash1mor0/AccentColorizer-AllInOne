@@ -111,8 +111,20 @@ fn set_preferred_app_mode(mode: i32) {
     }
 }
 
+fn flush_menu_themes() {
+    unsafe {
+        let uxtheme = LoadLibraryW(encode_wide("uxtheme.dll").as_ptr());
+        if !uxtheme.is_null()
+            && let Some(proc) = GetProcAddress(uxtheme, 136 as *const u8) {
+                let func: unsafe extern "system" fn() -> i32 = std::mem::transmute(proc);
+                func();
+            }
+    }
+}
+
 fn init_dark_mode() {
     set_preferred_app_mode(1); // AllowDark
+    flush_menu_themes();
 }
 
 struct ThemeSession {
@@ -131,7 +143,18 @@ impl ThemeSession {
     }
 
     fn modify_style(&self, part_id: i32, state_id: i32, prop_id: i32, accent_h: f64) -> bool {
-        self.modify_style_ext(part_id, state_id, prop_id, accent_h, false)
+        self.modify_style_ext(part_id, state_id, prop_id, accent_h, false, 0.0)
+    }
+
+    fn modify_style_rounded(
+        &self,
+        part_id: i32,
+        state_id: i32,
+        prop_id: i32,
+        accent_h: f64,
+        radius: f32,
+    ) -> bool {
+        self.modify_style_ext(part_id, state_id, prop_id, accent_h, false, radius)
     }
 
     fn modify_style_ext(
@@ -141,6 +164,7 @@ impl ThemeSession {
         prop_id: i32,
         accent_h: f64,
         tint_gray_fill: bool,
+        radius: f32,
     ) -> bool {
         let mut hbm: HBITMAP = std::ptr::null_mut();
         let hr = unsafe {
@@ -156,7 +180,7 @@ impl ThemeSession {
         if hr != 0 || hbm.is_null() {
             return false;
         }
-        iterate_bitmap(hbm, accent_h, tint_gray_fill)
+        iterate_bitmap(hbm, accent_h, tint_gray_fill, radius)
     }
 
     fn modify_style_light_pargb(
@@ -165,6 +189,7 @@ impl ThemeSession {
         state_id: i32,
         prop_id: i32,
         base_accent: Rgb,
+        radius: f32,
     ) -> bool {
         let mut hbm: HBITMAP = std::ptr::null_mut();
         let hr = unsafe {
@@ -180,7 +205,7 @@ impl ThemeSession {
         if hr != 0 || hbm.is_null() {
             return false;
         }
-        iterate_light_pargb_bitmap(hbm, base_accent)
+        iterate_light_pargb_bitmap(hbm, base_accent, radius)
     }
 }
 
@@ -195,7 +220,120 @@ impl Drop for ThemeSession {
     }
 }
 
-fn iterate_bitmap(hbm: HBITMAP, accent_h: f64, tint_gray_fill: bool) -> bool {
+fn round_corners(bits: &mut [u8], w: usize, h: usize, radius: f32) {
+    if radius <= 0.5 || w < 2 || h < 2 {
+        return;
+    }
+
+    // Special case for 9-slice ListView/TreeView/Desktop selection assets (margins 3, 3, 3, 3)
+    if w == 7 && h >= 7 {
+        let b_idx = 3 * 4;
+        let border_pixel = [bits[b_idx], bits[b_idx + 1], bits[b_idx + 2], bits[b_idx + 3]];
+
+        let f_y = (h / 2).min(3);
+        let f_idx = (f_y * w + 3) * 4;
+        let fill_pixel = [bits[f_idx], bits[f_idx + 1], bits[f_idx + 2], bits[f_idx + 3]];
+
+        let border = if border_pixel[3] > 0 {
+            border_pixel
+        } else {
+            fill_pixel
+        };
+
+        for is_top in [true, false] {
+            for is_left in [true, false] {
+                for cy in 0..3 {
+                    let y = if is_top { cy } else { h - 1 - cy };
+                    for cx in 0..3 {
+                        let x = if is_left { cx } else { w - 1 - cx };
+                        let idx = (y * w + x) * 4;
+                        if cx + cy < 2 {
+                            bits[idx] = 0;
+                            bits[idx + 1] = 0;
+                            bits[idx + 2] = 0;
+                            bits[idx + 3] = 0;
+                        } else if cx + cy == 2 {
+                            bits[idx] = border[0];
+                            bits[idx + 1] = border[1];
+                            bits[idx + 2] = border[2];
+                            bits[idx + 3] = border[3];
+                        } else {
+                            bits[idx] = fill_pixel[0];
+                            bits[idx + 1] = fill_pixel[1];
+                            bits[idx + 2] = fill_pixel[2];
+                            bits[idx + 3] = fill_pixel[3];
+                        }
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    let max_r = ((w as f32 / 2.0) - 0.5).min((h as f32 / 2.0) - 0.5);
+    let radius = radius.min(max_r);
+    if radius <= 0.5 {
+        return;
+    }
+
+    let r_sq = radius * radius;
+    let r_inner = (radius - 1.0).max(0.0);
+    let r_inner_sq = r_inner * r_inner;
+
+    for y in 0..h {
+        let is_top = (y as f32) < radius;
+        let is_bottom = (y as f32) >= (h as f32 - radius);
+        if !is_top && !is_bottom {
+            continue;
+        }
+
+        let cy = if is_top {
+            radius
+        } else {
+            h as f32 - radius
+        };
+        let dy = (y as f32 + 0.5) - cy;
+        let dy_sq = dy * dy;
+
+        for x in 0..w {
+            let is_left = (x as f32) < radius;
+            let is_right = (x as f32) >= (w as f32 - radius);
+            if !is_left && !is_right {
+                continue;
+            }
+
+            let cx = if is_left {
+                radius
+            } else {
+                w as f32 - radius
+            };
+            let dx = (x as f32 + 0.5) - cx;
+            let d_sq = dx * dx + dy_sq;
+
+            let idx = (y * w + x) * 4;
+
+            if d_sq > r_sq {
+                // Outside corner: fully transparent
+                bits[idx] = 0;
+                bits[idx + 1] = 0;
+                bits[idx + 2] = 0;
+                bits[idx + 3] = 0;
+            } else if d_sq > r_inner_sq {
+                // Anti-aliased transition edge
+                let d = d_sq.sqrt();
+                let factor = (radius - d).clamp(0.0, 1.0);
+                let old_a = bits[idx + 3] as f32;
+                let new_a = (old_a * factor).round() as u8;
+                bits[idx + 3] = new_a;
+                bits[idx] = ((bits[idx] as f32) * factor).round() as u8;
+                bits[idx + 1] = ((bits[idx + 1] as f32) * factor).round() as u8;
+                bits[idx + 2] = ((bits[idx + 2] as f32) * factor).round() as u8;
+            }
+        }
+    }
+}
+
+fn iterate_bitmap(hbm: HBITMAP, accent_h: f64, tint_gray_fill: bool, radius: f32) -> bool {
     if hbm.is_null() {
         return false;
     }
@@ -270,6 +408,10 @@ fn iterate_bitmap(hbm: HBITMAP, accent_h: f64, tint_gray_fill: bool) -> bool {
             }
         }
 
+        if radius > 0.5 {
+            round_corners(&mut bits, bm.bmWidth as usize, bm.bmHeight as usize, radius);
+        }
+
         SetBitmapBits(hbm, size as u32, bits.as_ptr() as *const _);
         true
     }
@@ -331,7 +473,7 @@ fn restore_header_dividers() {
     set_preferred_app_mode(1); // AllowDark
 }
 
-fn iterate_light_pargb_bitmap(hbm: HBITMAP, base_accent: Rgb) -> bool {
+fn iterate_light_pargb_bitmap(hbm: HBITMAP, base_accent: Rgb, radius: f32) -> bool {
     if hbm.is_null() {
         return false;
     }
@@ -362,6 +504,10 @@ fn iterate_light_pargb_bitmap(hbm: HBITMAP, base_accent: Rgb) -> bool {
             }
         }
 
+        if radius > 0.5 {
+            round_corners(&mut bits, bm.bmWidth as usize, bm.bmHeight as usize, radius);
+        }
+
         SetBitmapBits(hbm, size as u32, bits.as_ptr() as *const _);
         true
     }
@@ -371,7 +517,8 @@ fn recolor_light_explorer_classes(base_accent: Rgb) {
     if let Some(t) = ThemeSession::new("Explorer::TreeView") {
         for i in 1..=6 {
             for j in 1..=16 {
-                t.modify_style_light_pargb(i, j, TMT_DIBDATA, base_accent);
+                let radius = if i == 1 || i == 6 { 8.0 } else { 0.0 };
+                t.modify_style_light_pargb(i, j, TMT_DIBDATA, base_accent, radius);
             }
         }
     }
@@ -379,7 +526,7 @@ fn recolor_light_explorer_classes(base_accent: Rgb) {
     if let Some(t) = ThemeSession::new("Explorer::ListView") {
         for i in [1, 6] {
             for j in 1..=16 {
-                t.modify_style_light_pargb(i, j, TMT_DIBDATA, base_accent);
+                t.modify_style_light_pargb(i, j, TMT_DIBDATA, base_accent, 8.0);
             }
         }
     }
@@ -387,7 +534,8 @@ fn recolor_light_explorer_classes(base_accent: Rgb) {
     if let Some(t) = ThemeSession::new("ItemsView") {
         for i in [1, 3, 6] {
             for j in 0..=16 {
-                t.modify_style_light_pargb(i, j, TMT_DIBDATA, base_accent);
+                let radius = if i == 1 || i == 6 { 8.0 } else { 0.0 };
+                t.modify_style_light_pargb(i, j, TMT_DIBDATA, base_accent, radius);
             }
         }
     }
@@ -395,7 +543,7 @@ fn recolor_light_explorer_classes(base_accent: Rgb) {
     if let Some(t) = ThemeSession::new("ItemsView::ListView") {
         for i in [1, 6] {
             for j in 1..=16 {
-                t.modify_style_light_pargb(i, j, TMT_DIBDATA, base_accent);
+                t.modify_style_light_pargb(i, j, TMT_DIBDATA, base_accent, 8.0);
             }
         }
     }
@@ -406,7 +554,8 @@ fn recolor_explorer_classes(accent_h: f64) {
         for i in 1..=6 {
             for j in 1..=16 {
                 let tint_fill = i == 1 || i == 6;
-                t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, tint_fill);
+                let radius = if tint_fill { 8.0 } else { 0.0 };
+                t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, tint_fill, radius);
             }
         }
         for j in 1..=7 {
@@ -420,7 +569,8 @@ fn recolor_explorer_classes(accent_h: f64) {
         for i in 1..=10 {
             for j in 1..=16 {
                 let tint_fill = i == 1 || i == 6;
-                t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, tint_fill);
+                let radius = if tint_fill { 8.0 } else { 0.0 };
+                t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, tint_fill, radius);
             }
         }
         for i in 8..=9 {
@@ -435,7 +585,8 @@ fn recolor_explorer_classes(accent_h: f64) {
     if let Some(t) = ThemeSession::new("ItemsView") {
         for i in 1..=10 {
             for j in 0..=16 {
-                t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, true);
+                let radius = if i == 1 || i == 6 { 8.0 } else { 0.0 };
+                t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, true, radius);
             }
         }
     }
@@ -444,7 +595,8 @@ fn recolor_explorer_classes(accent_h: f64) {
         for i in 1..=16 {
             for j in 1..=16 {
                 let tint_fill = i == 1 || i == 6;
-                t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, tint_fill);
+                let radius = if tint_fill { 8.0 } else { 0.0 };
+                t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, tint_fill, radius);
             }
         }
         for i in 8..=9 {
@@ -477,7 +629,7 @@ pub fn modify_styles(
     restore_header_dividers();
 
     if let Some(t) = ThemeSession::new(VSCLASS_BUTTON) {
-        t.modify_style(BP_PUSHBUTTON, 0, TMT_DIBDATA, accent_h);
+        t.modify_style_rounded(BP_PUSHBUTTON, 0, TMT_DIBDATA, accent_h, 8.0);
         for j in 1..=7 {
             t.modify_style(BP_CHECKBOX, 0, j, accent_h);
             t.modify_style(BP_RADIOBUTTON, 0, j, accent_h);
@@ -587,7 +739,8 @@ pub fn modify_styles(
             for i in 1..=16 {
                 for j in 1..=16 {
                     let tint_fill = i == 1 || i == 6;
-                    t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, tint_fill);
+                    let radius = if tint_fill { 8.0 } else { 0.0 };
+                    t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, tint_fill, radius);
                 }
             }
             for i in 8..=9 {
@@ -693,11 +846,7 @@ pub fn modify_styles(
         t.modify_style(6, 1, TMT_DIBDATA, accent_h);
     }
 
-    if let Some(t) = ThemeSession::new("Desktop::ListView") {
-        for j in 0..=9 {
-            t.modify_style(1, j, TMT_DIBDATA, accent_h);
-        }
-    }
+    recolor_desktop_listview(accent_h);
 
     if let Some(t) = ThemeSession::new("TreeView") {
         for i in 0..=10 {
@@ -766,8 +915,14 @@ pub fn modify_styles(
 
     if colorize_menus
         && let Some(t) = ThemeSession::new("Menu") {
-            t.modify_style(14, 0, TMT_DIBDATA, accent_h);
-            t.modify_style(13, 0, TMT_DIBDATA, accent_h);
+            t.modify_style_rounded(14, 0, TMT_DIBDATA, accent_h, 8.0);
+            t.modify_style_rounded(13, 0, TMT_DIBDATA, accent_h, 8.0);
+            t.modify_style_rounded(14, 1, TMT_DIBDATA, accent_h, 8.0);
+            t.modify_style_rounded(13, 1, TMT_DIBDATA, accent_h, 8.0);
+            t.modify_style_rounded(14, 2, TMT_DIBDATA, accent_h, 8.0);
+            t.modify_style_rounded(13, 2, TMT_DIBDATA, accent_h, 8.0);
+            t.modify_style_rounded(14, 3, TMT_DIBDATA, accent_h, 8.0);
+            t.modify_style_rounded(13, 3, TMT_DIBDATA, accent_h, 8.0);
             t.modify_style(12, 0, TMT_DIBDATA, accent_h);
             t.modify_style(8, 0, TMT_DIBDATA, accent_h);
             t.modify_style(7, 0, TMT_DIBDATA, accent_h);
@@ -838,4 +993,122 @@ pub fn modify_styles(
     }
 
     restore_header_dividers();
+}
+
+fn recolor_desktop_listview(accent_h: f64) {
+    if let Some(t) = ThemeSession::new("Desktop::ListView") {
+        let base_accent = crate::color::Hsv {
+            h: accent_h,
+            s: 1.0,
+            v: 0.85,
+        }
+        .to_rgb();
+
+        for j in 0..=9 {
+            let mut hbm: HBITMAP = std::ptr::null_mut();
+            let hr = unsafe {
+                GetThemeBitmap(t.theme, 1, j, TMT_DIBDATA, GBF_DIRECT, &mut hbm)
+            };
+            if hr == 0 && !hbm.is_null() {
+                unsafe {
+                    let mut bm: BITMAP = std::mem::zeroed();
+                    if GetObjectW(
+                        hbm as *mut _,
+                        std::mem::size_of::<BITMAP>() as i32,
+                        &mut bm as *mut _ as *mut _,
+                    ) != 0
+                        && bm.bmBitsPixel == 32
+                        && bm.bmWidth > 0
+                        && bm.bmHeight > 0
+                    {
+                        let w = bm.bmWidth as usize;
+                        let h = bm.bmHeight as usize;
+                        let mut bits = vec![0u8; w * h * 4];
+                        if GetBitmapBits(hbm, bits.len() as i32, bits.as_mut_ptr() as *mut _) != 0 {
+                            // User specification:
+                            // State 2 (hot): 30% opacity (76), with border
+                            // State 3 (selected): 45% opacity (115), NO border
+                            // State 6 (hot selected): 70% opacity (178), NO border
+                            // State 5 (unfocused): 20% opacity (51), NO border
+                            let (fill_a, has_border) = match j {
+                                2 => (76u8, true),   // 30%
+                                3 => (115u8, false), // 45%
+                                6 => (178u8, false), // 70%
+                                5 => (51u8, false),  // 20%
+                                _ => (115u8, false),
+                            };
+
+                            for y in 0..h {
+                                for x in 0..w {
+                                    let is_border = y == 0 || y == h - 1 || x == 0 || x == w - 1;
+                                    let idx = (y * w + x) * 4;
+                                    let a = if is_border && has_border { 255u8 } else { fill_a };
+                                    bits[idx] = ((base_accent.b as u32 * a as u32) / 255) as u8;
+                                    bits[idx + 1] = ((base_accent.g as u32 * a as u32) / 255) as u8;
+                                    bits[idx + 2] = ((base_accent.r as u32 * a as u32) / 255) as u8;
+                                    bits[idx + 3] = a;
+                                }
+                            }
+
+                            round_corners(&mut bits, w, h, 8.0);
+                            SetBitmapBits(hbm, bits.len() as u32, bits.as_ptr() as *const _);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_inspect_desktop_theme_bitmaps() {
+        recolor_desktop_listview(22.0);
+
+        if let Some(t) = ThemeSession::new("Desktop::ListView") {
+            for j in [2, 3, 5, 6] {
+                let mut hbm: HBITMAP = std::ptr::null_mut();
+                let hr = unsafe {
+                    GetThemeBitmap(t.theme, 1, j, TMT_DIBDATA, GBF_DIRECT, &mut hbm)
+                };
+                if hr == 0 && !hbm.is_null() {
+                    unsafe {
+                        let mut bm: BITMAP = std::mem::zeroed();
+                        GetObjectW(hbm as *mut _, std::mem::size_of::<BITMAP>() as i32, &mut bm as *mut _ as *mut _);
+                        let w = bm.bmWidth as usize;
+                        let h = bm.bmHeight as usize;
+                        let mut bits = vec![0u8; w * h * 4];
+                        GetBitmapBits(hbm, bits.len() as i32, bits.as_mut_ptr() as *mut _);
+
+                        let border_idx = 3 * 4;
+                        let fill_idx = ((3 * w + 3) * 4) as usize;
+                        println!("Desktop::ListView state {}: border alpha={}, fill alpha={}",
+                            j, bits[border_idx + 3], bits[fill_idx + 3]);
+                        match j {
+                            2 => {
+                                assert_eq!(bits[border_idx + 3], 255);
+                                assert_eq!(bits[fill_idx + 3], 76);
+                            }
+                            3 => {
+                                assert_eq!(bits[border_idx + 3], 115);
+                                assert_eq!(bits[fill_idx + 3], 115);
+                            }
+                            6 => {
+                                assert_eq!(bits[border_idx + 3], 178);
+                                assert_eq!(bits[fill_idx + 3], 178);
+                            }
+                            5 => {
+                                assert_eq!(bits[border_idx + 3], 51);
+                                assert_eq!(bits[fill_idx + 3], 51);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

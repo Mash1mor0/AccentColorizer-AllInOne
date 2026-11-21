@@ -231,6 +231,32 @@ pub fn broadcast_theme_refresh() {
             150,
             &mut result,
         );
+
+        // 6. Invalidate desktop view so icon selection plates pick up the new style immediately
+        let progman = windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW(
+            encode_wide("Progman").as_ptr(),
+            std::ptr::null(),
+        );
+        if !progman.is_null() {
+            let def_view = windows_sys::Win32::UI::WindowsAndMessaging::FindWindowExW(
+                progman,
+                std::ptr::null_mut(),
+                encode_wide("SHELLDLL_DefView").as_ptr(),
+                std::ptr::null(),
+            );
+            if !def_view.is_null() {
+                let list_view = windows_sys::Win32::UI::WindowsAndMessaging::FindWindowExW(
+                    def_view,
+                    std::ptr::null_mut(),
+                    encode_wide("SysListView32").as_ptr(),
+                    std::ptr::null(),
+                );
+                if !list_view.is_null() {
+                    windows_sys::Win32::Graphics::Gdi::InvalidateRect(list_view, std::ptr::null(), 1);
+                }
+                windows_sys::Win32::Graphics::Gdi::InvalidateRect(def_view, std::ptr::null(), 1);
+            }
+        }
     }
 }
 
