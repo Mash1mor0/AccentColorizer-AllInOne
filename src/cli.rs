@@ -26,6 +26,12 @@ pub fn parse_flags(args: &[String]) -> (AppConfig, bool) {
             "--no-svg" | "--no-e11" => {
                 config.colorize_e11_svg = false;
             }
+            "--no-explorer-selection" | "--no-explorer-select" | "--no-explorer-highlight" => {
+                config.colorize_explorer_selection = false;
+            }
+            "--no-desktop-selection" | "--no-desktop-select" | "--no-desktop-highlight" => {
+                config.colorize_desktop_selection = false;
+            }
             "--restart-explorer" => {
                 config.restart_explorer = true;
             }
@@ -68,16 +74,22 @@ pub fn run_cli() {
                         config.colorize_menus = true;
                         config.colorize_progress_bar = true;
                         config.colorize_e11_svg = true;
+                        config.colorize_explorer_selection = true;
+                        config.colorize_desktop_selection = true;
                     }
                     "--win32-only" => {
                         config.colorize_menus = true;
                         config.colorize_progress_bar = true;
                         config.colorize_e11_svg = false;
+                        config.colorize_explorer_selection = true;
+                        config.colorize_desktop_selection = true;
                     }
                     "--e11-only" => {
                         config.colorize_menus = false;
                         config.colorize_progress_bar = false;
                         config.colorize_e11_svg = true;
+                        config.colorize_explorer_selection = false;
+                        config.colorize_desktop_selection = false;
                     }
                     _ => {}
                 }
@@ -89,7 +101,10 @@ pub fn run_cli() {
                 None => get_current_system_accent(),
             };
 
-            let win32 = config.colorize_menus || config.colorize_progress_bar;
+            let win32 = config.colorize_menus
+                || config.colorize_progress_bar
+                || config.colorize_explorer_selection
+                || config.colorize_desktop_selection;
             let e11 = config.colorize_e11_svg && win_ver >= WindowsVersion::Win11;
 
             if win32 {
@@ -219,12 +234,14 @@ Commands:
   --version, -v         Show version
 
 Options (for background daemon and 'apply'):
-  --no-progress         Disable progress bar colorization
-  --no-win32            Disable classic Win32 menu & control colorization
-  --no-svg              Disable Windows 11 File Explorer SVG icon patching
-  --color <#RRGGBB>     Override Windows accent color with a fixed custom hex code
-  --restart-explorer    Restart explorer.exe after patching icons
-  --foreground, -f      Run daemon attached to console (shows live log output)
+  --no-progress           Disable progress bar colorization
+  --no-win32              Disable classic Win32 menu & control colorization
+  --no-svg                Disable Windows 11 File Explorer SVG icon patching
+  --no-explorer-selection Disable File Explorer item selection plate colorization & rounding
+  --no-desktop-selection  Disable Desktop item selection plate colorization & rounding
+  --color <#RRGGBB>       Override Windows accent color with a fixed custom hex code
+  --restart-explorer      Restart explorer.exe after patching icons
+  --foreground, -f        Run daemon attached to console (shows live log output)
 
 Options for 'revert':
   --no-restart-explorer Do not restart explorer.exe after restoring

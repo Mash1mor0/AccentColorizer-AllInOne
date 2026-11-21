@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use windows_sys::Win32::Graphics::Gdi::{
     GetBitmapBits, GetObjectW, GetSysColor, SetBitmapBits, SetSysColors, BITMAP, COLOR_ACTIVECAPTION,
     COLOR_GRADIENTACTIVECAPTION, COLOR_HIGHLIGHT, COLOR_HOTLIGHT, COLOR_MENUHILIGHT, HBITMAP,
@@ -96,8 +99,9 @@ pub fn restore_sys_colors() {
     }
 
     // Reset uxtheme controls (buttons, progress bars, menus) back to default Windows blue hue (207.0 deg)
+    // and restore default factory selection behavior for explorer and desktop
     let win_ver = crate::system::detect_windows_version();
-    modify_styles(207.0, win_ver, true, true);
+    modify_styles(207.0, win_ver, true, true, false, false);
 }
 
 fn set_preferred_app_mode(mode: i32) {
@@ -127,8 +131,48 @@ fn init_dark_mode() {
     flush_menu_themes();
 }
 
+type BitmapKey = (String, i32, i32, i32);
+type PristineBitmapMap = HashMap<BitmapKey, Vec<u8>>;
+
+static PRISTINE_THEME_BITMAPS: Mutex<Option<PristineBitmapMap>> = Mutex::new(None);
+
+fn capture_and_save_pristine(
+    class_name: &str,
+    part_id: i32,
+    state_id: i32,
+    prop_id: i32,
+    hbm: HBITMAP,
+) {
+    let key = (class_name.to_string(), part_id, state_id, prop_id);
+    let mut guard = PRISTINE_THEME_BITMAPS.lock().unwrap();
+    let map = guard.get_or_insert_with(HashMap::new);
+    if map.contains_key(&key) {
+        return;
+    }
+
+    unsafe {
+        let mut bm: BITMAP = std::mem::zeroed();
+        if GetObjectW(
+            hbm as *mut _,
+            std::mem::size_of::<BITMAP>() as i32,
+            &mut bm as *mut _ as *mut _,
+        ) != 0
+            && bm.bmBitsPixel == 32
+            && bm.bmWidth > 0
+            && bm.bmHeight > 0
+        {
+            let size = (bm.bmWidth * bm.bmHeight * 4) as usize;
+            let mut orig = vec![0u8; size];
+            if GetBitmapBits(hbm, size as i32, orig.as_mut_ptr() as *mut _) != 0 {
+                map.insert(key, orig);
+            }
+        }
+    }
+}
+
 struct ThemeSession {
     theme: HTHEME,
+    class_name: String,
 }
 
 impl ThemeSession {
@@ -138,8 +182,42 @@ impl ThemeSession {
         if theme == 0 {
             None
         } else {
-            Some(Self { theme })
+            Some(Self {
+                theme,
+                class_name: class_name.to_string(),
+            })
         }
+    }
+
+    fn restore_pristine(&self, part_id: i32, state_id: i32, prop_id: i32) -> bool {
+        let guard = PRISTINE_THEME_BITMAPS.lock().unwrap();
+        if let Some(map) = guard.as_ref()
+            && let Some(pristine_bits) =
+                map.get(&(self.class_name.clone(), part_id, state_id, prop_id))
+        {
+            let mut hbm: HBITMAP = std::ptr::null_mut();
+            let hr = unsafe {
+                GetThemeBitmap(
+                    self.theme,
+                    part_id,
+                    state_id,
+                    prop_id,
+                    GBF_DIRECT,
+                    &mut hbm,
+                )
+            };
+            if hr == 0 && !hbm.is_null() {
+                unsafe {
+                    SetBitmapBits(
+                        hbm,
+                        pristine_bits.len() as u32,
+                        pristine_bits.as_ptr() as *const _,
+                    );
+                }
+                return true;
+            }
+        }
+        false
     }
 
     fn modify_style(&self, part_id: i32, state_id: i32, prop_id: i32, accent_h: f64) -> bool {
@@ -180,6 +258,7 @@ impl ThemeSession {
         if hr != 0 || hbm.is_null() {
             return false;
         }
+        capture_and_save_pristine(&self.class_name, part_id, state_id, prop_id, hbm);
         iterate_bitmap(hbm, accent_h, tint_gray_fill, radius)
     }
 
@@ -205,6 +284,7 @@ impl ThemeSession {
         if hr != 0 || hbm.is_null() {
             return false;
         }
+        capture_and_save_pristine(&self.class_name, part_id, state_id, prop_id, hbm);
         iterate_light_pargb_bitmap(hbm, base_accent, radius)
     }
 }
@@ -624,6 +704,8 @@ pub fn modify_styles(
     win_ver: WindowsVersion,
     colorize_menus: bool,
     colorize_progress_bar: bool,
+    colorize_explorer_selection: bool,
+    colorize_desktop_selection: bool,
 ) {
     init_dark_mode();
     restore_header_dividers();
@@ -718,39 +800,43 @@ pub fn modify_styles(
     }
     .to_rgb();
 
-    // 1. Recolor Explorer selection & focus controls under ForceLight (Light Mode)
-    set_preferred_app_mode(3); // ForceLight
-    recolor_light_explorer_classes(base_accent);
+    if colorize_explorer_selection {
+        // 1. Recolor Explorer selection & focus controls under ForceLight (Light Mode)
+        set_preferred_app_mode(3); // ForceLight
+        recolor_light_explorer_classes(base_accent);
 
-    // 2. Recolor Explorer selection & focus controls under ForceDark (Dark Mode)
-    set_preferred_app_mode(2); // ForceDark
-    recolor_explorer_classes(accent_h);
+        // 2. Recolor Explorer selection & focus controls under ForceDark (Dark Mode)
+        set_preferred_app_mode(2); // ForceDark
+        recolor_explorer_classes(accent_h);
 
-    let dark_classes = [
-        "DarkMode_Explorer::ListView",
-        "DarkMode_ItemsView::ListView",
-        "DarkMode::ListView",
-        "DarkMode_Explorer::TreeView",
-        "DarkMode::TreeView",
-    ];
+        let dark_classes = [
+            "DarkMode_Explorer::ListView",
+            "DarkMode_ItemsView::ListView",
+            "DarkMode::ListView",
+            "DarkMode_Explorer::TreeView",
+            "DarkMode::TreeView",
+        ];
 
-    for cls in dark_classes {
-        if let Some(t) = ThemeSession::new(cls) {
-            for i in 1..=16 {
-                for j in 1..=16 {
-                    let tint_fill = i == 1 || i == 6;
-                    let radius = if tint_fill { 8.0 } else { 0.0 };
-                    t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, tint_fill, radius);
+        for cls in dark_classes {
+            if let Some(t) = ThemeSession::new(cls) {
+                for i in 1..=16 {
+                    for j in 1..=16 {
+                        let tint_fill = i == 1 || i == 6;
+                        let radius = if tint_fill { 8.0 } else { 0.0 };
+                        t.modify_style_ext(i, j, TMT_DIBDATA, accent_h, tint_fill, radius);
+                    }
                 }
-            }
-            for i in 8..=9 {
-                for j in 1..=7 {
-                    for k in 1..=7 {
-                        t.modify_style(i, j, k, accent_h);
+                for i in 8..=9 {
+                    for j in 1..=7 {
+                        for k in 1..=7 {
+                            t.modify_style(i, j, k, accent_h);
+                        }
                     }
                 }
             }
         }
+    } else {
+        restore_explorer_selection_classes();
     }
 
     set_preferred_app_mode(1); // AllowDark
@@ -846,7 +932,11 @@ pub fn modify_styles(
         t.modify_style(6, 1, TMT_DIBDATA, accent_h);
     }
 
-    recolor_desktop_listview(accent_h);
+    if colorize_desktop_selection {
+        recolor_desktop_listview(accent_h);
+    } else {
+        restore_desktop_listview();
+    }
 
     if let Some(t) = ThemeSession::new("TreeView") {
         for i in 0..=10 {
@@ -1010,6 +1100,7 @@ fn recolor_desktop_listview(accent_h: f64) {
                 GetThemeBitmap(t.theme, 1, j, TMT_DIBDATA, GBF_DIRECT, &mut hbm)
             };
             if hr == 0 && !hbm.is_null() {
+                capture_and_save_pristine("Desktop::ListView", 1, j, TMT_DIBDATA, hbm);
                 unsafe {
                     let mut bm: BITMAP = std::mem::zeroed();
                     if GetObjectW(
@@ -1053,6 +1144,126 @@ fn recolor_desktop_listview(accent_h: f64) {
                             round_corners(&mut bits, w, h, 8.0);
                             SetBitmapBits(hbm, bits.len() as u32, bits.as_ptr() as *const _);
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn restore_desktop_listview() {
+    if let Some(t) = ThemeSession::new("Desktop::ListView") {
+        for j in 0..=9 {
+            t.restore_pristine(1, j, TMT_DIBDATA);
+        }
+    }
+}
+
+fn restore_explorer_selection_classes() {
+    set_preferred_app_mode(3); // ForceLight
+    if let Some(t) = ThemeSession::new("Explorer::TreeView") {
+        for i in 1..=6 {
+            for j in 1..=16 {
+                t.restore_pristine(i, j, TMT_DIBDATA);
+            }
+        }
+    }
+
+    if let Some(t) = ThemeSession::new("Explorer::ListView") {
+        for i in [1, 6] {
+            for j in 1..=16 {
+                t.restore_pristine(i, j, TMT_DIBDATA);
+            }
+        }
+    }
+
+    if let Some(t) = ThemeSession::new("ItemsView") {
+        for i in [1, 3, 6] {
+            for j in 0..=16 {
+                t.restore_pristine(i, j, TMT_DIBDATA);
+            }
+        }
+    }
+
+    if let Some(t) = ThemeSession::new("ItemsView::ListView") {
+        for i in [1, 6] {
+            for j in 1..=16 {
+                t.restore_pristine(i, j, TMT_DIBDATA);
+            }
+        }
+    }
+
+    set_preferred_app_mode(2); // ForceDark
+    if let Some(t) = ThemeSession::new("Explorer::TreeView") {
+        for i in 1..=6 {
+            for j in 1..=16 {
+                t.restore_pristine(i, j, TMT_DIBDATA);
+            }
+        }
+        for j in 1..=7 {
+            for k in 1..=7 {
+                t.restore_pristine(4, j, k);
+            }
+        }
+    }
+
+    if let Some(t) = ThemeSession::new("Explorer::ListView") {
+        for i in 1..=10 {
+            for j in 1..=16 {
+                t.restore_pristine(i, j, TMT_DIBDATA);
+            }
+        }
+        for i in 8..=9 {
+            for j in 1..=7 {
+                for k in 1..=7 {
+                    t.restore_pristine(i, j, k);
+                }
+            }
+        }
+    }
+
+    if let Some(t) = ThemeSession::new("ItemsView") {
+        for i in 1..=10 {
+            for j in 0..=16 {
+                t.restore_pristine(i, j, TMT_DIBDATA);
+            }
+        }
+    }
+
+    if let Some(t) = ThemeSession::new("ItemsView::ListView") {
+        for i in 1..=16 {
+            for j in 1..=16 {
+                t.restore_pristine(i, j, TMT_DIBDATA);
+            }
+        }
+        for i in 8..=9 {
+            for j in 1..=7 {
+                for k in 1..=7 {
+                    t.restore_pristine(i, j, k);
+                }
+            }
+        }
+    }
+
+    let dark_classes = [
+        "DarkMode_Explorer::ListView",
+        "DarkMode_ItemsView::ListView",
+        "DarkMode::ListView",
+        "DarkMode_Explorer::TreeView",
+        "DarkMode::TreeView",
+    ];
+
+    for cls in dark_classes {
+        if let Some(t) = ThemeSession::new(cls) {
+            for i in 1..=16 {
+                for j in 1..=16 {
+                    t.restore_pristine(i, j, TMT_DIBDATA);
+                }
+            }
+            for i in 8..=9 {
+                for j in 1..=7 {
+                    for k in 1..=7 {
+                        t.restore_pristine(i, j, k);
                     }
                 }
             }

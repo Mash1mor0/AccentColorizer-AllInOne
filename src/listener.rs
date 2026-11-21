@@ -28,6 +28,8 @@ pub struct AppConfig {
     pub colorize_menus: bool,
     pub colorize_progress_bar: bool,
     pub colorize_e11_svg: bool,
+    pub colorize_explorer_selection: bool,
+    pub colorize_desktop_selection: bool,
     pub restart_explorer: bool,
     pub custom_accent_hex: Option<String>,
 }
@@ -38,6 +40,8 @@ impl Default for AppConfig {
             colorize_menus: true,
             colorize_progress_bar: true,
             colorize_e11_svg: true,
+            colorize_explorer_selection: true,
+            colorize_desktop_selection: true,
             restart_explorer: false,
             custom_accent_hex: None,
         }
@@ -291,6 +295,8 @@ pub fn apply_all_in_memory(config: &AppConfig, win_ver: WindowsVersion, accent: 
         win_ver,
         config.colorize_menus,
         config.colorize_progress_bar,
+        config.colorize_explorer_selection,
+        config.colorize_desktop_selection,
     );
 }
 
