@@ -10,8 +10,10 @@ use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::System::Threading::{
     CreateMutexW, GetCurrentProcess, OpenProcessToken,
 };
-use windows_sys::Win32::UI::Shell::ShellExecuteW;
-use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
+use windows_sys::Win32::UI::Shell::{ShellExecuteW, SHChangeNotify, SHCNE_ASSOCCHANGED, SHCNF_IDLIST};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    SendMessageTimeoutW, SW_HIDE,
+};
 
 use crate::color::encode_wide;
 
@@ -45,7 +47,7 @@ pub fn detect_windows_version() -> WindowsVersion {
     unsafe {
         let ntdll = GetModuleHandleW(encode_wide("ntdll.dll").as_ptr());
         if !ntdll.is_null() {
-            let proc = GetProcAddress(ntdll, b"RtlGetVersion\0".as_ptr());
+            let proc = GetProcAddress(ntdll, c"RtlGetVersion".as_ptr().cast());
             if let Some(proc) = proc {
                 let rtl_get_version: RtlGetVersionFn = std::mem::transmute(proc);
                 let mut info: OsVersionInfoExW = std::mem::zeroed();
@@ -169,6 +171,67 @@ pub fn restart_explorer() {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn();
+}
+
+pub fn broadcast_theme_refresh() {
+    const HWND_BROADCAST: windows_sys::Win32::Foundation::HWND = 0xFFFF as windows_sys::Win32::Foundation::HWND;
+    const SMTO_ABORTIFHUNG: u32 = 0x0002;
+    const WM_SETTINGCHANGE: u32 = 0x001A;
+    const WM_THEMECHANGED: u32 = 0x031A;
+    const WM_SYSCOLORCHANGE: u32 = 0x0015;
+
+    unsafe {
+        let mut result = 0usize;
+        let immersive_param = encode_wide("ImmersiveColorSet");
+        let theme_param = encode_wide("WindowsThemeElement");
+
+        // 1. Notify Windows Shell of association/icon change
+        SHChangeNotify(SHCNE_ASSOCCHANGED as i32, SHCNF_IDLIST, std::ptr::null(), std::ptr::null());
+
+        // 2. Broadcast ImmersiveColorSet setting change
+        SendMessageTimeoutW(
+            HWND_BROADCAST,
+            WM_SETTINGCHANGE,
+            0,
+            immersive_param.as_ptr() as isize,
+            SMTO_ABORTIFHUNG,
+            150,
+            &mut result,
+        );
+
+        // 3. Broadcast WindowsThemeElement setting change
+        SendMessageTimeoutW(
+            HWND_BROADCAST,
+            WM_SETTINGCHANGE,
+            0,
+            theme_param.as_ptr() as isize,
+            SMTO_ABORTIFHUNG,
+            150,
+            &mut result,
+        );
+
+        // 4. Broadcast WM_THEMECHANGED to refresh visual styles & XAML resources
+        SendMessageTimeoutW(
+            HWND_BROADCAST,
+            WM_THEMECHANGED,
+            0,
+            0,
+            SMTO_ABORTIFHUNG,
+            150,
+            &mut result,
+        );
+
+        // 5. Broadcast WM_SYSCOLORCHANGE
+        SendMessageTimeoutW(
+            HWND_BROADCAST,
+            WM_SYSCOLORCHANGE,
+            0,
+            0,
+            SMTO_ABORTIFHUNG,
+            150,
+            &mut result,
+        );
+    }
 }
 
 pub fn get_timestamp() -> String {

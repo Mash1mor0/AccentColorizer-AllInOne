@@ -24,9 +24,6 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub custom_accent_hex: Option<String>,
-
-    #[serde(default = "default_debounce")]
-    pub debounce_ms: u64,
 }
 
 const fn default_true() -> bool {
@@ -37,10 +34,6 @@ const fn default_false() -> bool {
     false
 }
 
-const fn default_debounce() -> u64 {
-    150
-}
-
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -49,17 +42,15 @@ impl Default for AppConfig {
             colorize_e11_svg: true,
             restart_explorer: false,
             custom_accent_hex: None,
-            debounce_ms: 150,
         }
     }
 }
 
 pub fn get_exe_dir() -> PathBuf {
-    if let Ok(exe_path) = env::current_exe() {
-        if let Some(parent) = exe_path.parent() {
+    if let Ok(exe_path) = env::current_exe()
+        && let Some(parent) = exe_path.parent() {
             return parent.to_path_buf();
         }
-    }
     PathBuf::from(".")
 }
 
@@ -69,13 +60,11 @@ pub fn get_config_path() -> PathBuf {
 
 pub fn load_config() -> AppConfig {
     let path = get_config_path();
-    if path.exists() {
-        if let Ok(content) = fs::read_to_string(&path) {
-            if let Ok(cfg) = toml::from_str::<AppConfig>(&content) {
+    if path.exists()
+        && let Ok(content) = fs::read_to_string(&path)
+            && let Ok(cfg) = toml::from_str::<AppConfig>(&content) {
                 return cfg;
             }
-        }
-    }
 
     // Fallback: check registry HKCU\Software\AccentColorizer
     let mut config = AppConfig::default();
@@ -113,16 +102,12 @@ restart_explorer = {}
 # Optional: Override system accent color with a custom hex code (e.g. "#FF5500")
 # Leave unset or empty to follow Windows system accent
 {}
-
-# Event debounce delay in milliseconds for rapid Windows color changes
-debounce_ms = {}
 "##,
         config.colorize_menus,
         config.colorize_progress_bar,
         config.colorize_e11_svg,
         config.restart_explorer,
-        custom_hex_str,
-        config.debounce_ms
+        custom_hex_str
     );
 
     fs::write(&path, toml_str)?;

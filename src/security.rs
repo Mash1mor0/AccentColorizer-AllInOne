@@ -24,17 +24,17 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 
 use crate::color::encode_wide;
 
-pub const SID_ADMINISTRATORS: &str = "S-1-5-32-544";
-pub const SID_TRUSTED_INSTALLER: &str =
+const SID_ADMINISTRATORS: &str = "S-1-5-32-544";
+const SID_TRUSTED_INSTALLER: &str =
     "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
 
-pub const SUB_CONTAINERS_AND_OBJECTS_INHERIT: u32 = 3;
-pub const GENERIC_ALL: u32 = 0x10000000;
+const SUB_CONTAINERS_AND_OBJECTS_INHERIT: u32 = 3;
+const GENERIC_ALL: u32 = 0x10000000;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[link(name = "advapi32")]
 unsafe extern "system" {
-    pub fn ConvertStringSidToSidW(
+    fn ConvertStringSidToSidW(
         string_sid: *const u16,
         sid: *mut *mut std::ffi::c_void,
     ) -> i32;
@@ -42,10 +42,10 @@ unsafe extern "system" {
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
-    pub fn LocalFree(hmem: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    fn LocalFree(hmem: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
 }
 
-pub struct AutoSid(pub *mut std::ffi::c_void);
+struct AutoSid(*mut std::ffi::c_void);
 
 impl Drop for AutoSid {
     fn drop(&mut self) {
@@ -57,7 +57,7 @@ impl Drop for AutoSid {
     }
 }
 
-pub fn get_sid(sid_str: &str) -> Option<AutoSid> {
+fn get_sid(sid_str: &str) -> Option<AutoSid> {
     let wide = encode_wide(sid_str);
     let mut psid: *mut std::ffi::c_void = std::ptr::null_mut();
     unsafe {
@@ -70,7 +70,7 @@ pub fn get_sid(sid_str: &str) -> Option<AutoSid> {
 }
 
 /// Step 1: Enable required privileges in process token
-pub fn enable_security_privileges() -> bool {
+fn enable_security_privileges() -> bool {
     unsafe {
         let mut token: HANDLE = std::ptr::null_mut();
         if OpenProcessToken(
@@ -131,7 +131,7 @@ pub fn take_ownership_and_grant_admin(path: &Path) -> Result<(), io::Error> {
 
     // 2. Set Owner to BUILTIN\Administrators via SetNamedSecurityInfoW
     let admin_sid = get_sid(SID_ADMINISTRATORS).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::Other, "Failed to resolve Administrators SID")
+        io::Error::other("Failed to resolve Administrators SID")
     })?;
 
     let owner_res = unsafe {
@@ -229,14 +229,13 @@ pub fn take_ownership_and_grant_admin(path: &Path) -> Result<(), io::Error> {
 pub fn take_ownership_and_grant_admin_recursive(dir: &Path) -> Result<(), io::Error> {
     take_ownership_and_grant_admin(dir)?;
 
-    if dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(dir) {
+    if dir.is_dir()
+        && let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let p = entry.path();
                 let _ = take_ownership_and_grant_admin(&p);
             }
         }
-    }
 
     Ok(())
 }
@@ -249,10 +248,7 @@ pub fn restore_trusted_installer(path: &Path) -> Result<(), io::Error> {
     let path_wide = encode_wide(&path_str);
 
     let ti_sid = get_sid(SID_TRUSTED_INSTALLER).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            "Failed to resolve TrustedInstaller SID",
-        )
+        io::Error::other("Failed to resolve TrustedInstaller SID")
     })?;
 
     // 1. Native API: Set owner back to TrustedInstaller and reset DACL inheritance
@@ -315,13 +311,12 @@ pub fn restore_trusted_installer(path: &Path) -> Result<(), io::Error> {
 
 /// Recursively restore TrustedInstaller ownership to directory and all files inside
 pub fn restore_trusted_installer_recursive(dir: &Path) {
-    if dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(dir) {
+    if dir.is_dir()
+        && let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let p = entry.path();
                 let _ = restore_trusted_installer(&p);
             }
         }
-    }
     let _ = restore_trusted_installer(dir);
 }

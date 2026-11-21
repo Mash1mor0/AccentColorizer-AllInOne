@@ -134,7 +134,7 @@ type FnGetImmersiveUserColorSetPreference = unsafe extern "system" fn(bool, bool
 type FnGetImmersiveColorTypeFromName = unsafe extern "system" fn(*const u16) -> u32;
 type FnGetImmersiveColorFromColorSetEx = unsafe extern "system" fn(u32, u32, bool, u32) -> u32;
 
-pub fn get_immersive_color(name: &str) -> Option<Rgb> {
+fn get_immersive_color(name: &str) -> Option<Rgb> {
     unsafe {
         let uxtheme = LoadLibraryW(encode_wide("uxtheme.dll").as_ptr());
         if uxtheme.is_null() {
@@ -165,7 +165,7 @@ pub fn get_immersive_color(name: &str) -> Option<Rgb> {
     }
 }
 
-pub fn get_dwm_accent_color() -> Option<Rgb> {
+fn get_dwm_accent_color() -> Option<Rgb> {
     unsafe {
         let mut color: u32 = 0;
         let mut opaque: i32 = 0;
@@ -180,7 +180,7 @@ pub fn get_dwm_accent_color() -> Option<Rgb> {
     None
 }
 
-pub fn get_registry_accent_color() -> Option<Rgb> {
+fn get_registry_accent_color() -> Option<Rgb> {
     unsafe {
         let mut hkey = std::ptr::null_mut();
         let subkey = encode_wide(r"Software\Microsoft\Windows\DWM");

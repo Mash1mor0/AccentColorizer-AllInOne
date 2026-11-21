@@ -1,25 +1,89 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::os::windows::fs::MetadataExt;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::Mutex;
 
 use crate::color::{blend_colors, Rgb};
 use crate::config::get_exe_dir;
-
-const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x00000400;
 
 const DEFAULT_LIGHT_HEX: &str = "#0078D4";
 const DEFAULT_DARK_HEX: &str = "#4CC2FF";
 const SPOTLIGHT_DARK_BASE: &str = "#251840";
 const SPOTLIGHT_DEFAULT_LIGHT: &str = "#0C59A4";
 
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x00000400;
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+#[derive(Debug, Clone)]
 pub struct DiscoveredPackage {
     pub package_name: String,
+    pub images_dir: PathBuf,
     pub contrast_standard_dir: PathBuf,
+    pub genuine_orig_dir: PathBuf,
 }
+
+#[derive(Clone)]
+struct SvgTemplate {
+    rel_path: PathBuf,
+    content: String,
+    theme: &'static str,
+    is_spotlight: bool,
+}
+
+static TEMPLATES: Mutex<Option<HashMap<String, Vec<SvgTemplate>>>> = Mutex::new(None);
 
 pub fn get_backup_root_dir() -> PathBuf {
     get_exe_dir().join("backup")
+}
+
+pub fn is_reparse_point(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|m| (m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+        .unwrap_or(false)
+}
+
+pub fn create_junction(junction: &Path, target: &Path) -> io::Result<()> {
+    let junction_str = junction.to_string_lossy();
+    let target_str = target.to_string_lossy();
+    let status = Command::new("cmd.exe")
+        .args(["/C", "mklink", "/J", &junction_str, &target_str])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "mklink /J failed with exit code: {:?}",
+            status.code()
+        )))
+    }
+}
+
+pub fn grant_app_packages_read(dir: &Path) {
+    let dir_str = dir.to_string_lossy();
+    // Grant ALL APPLICATION PACKAGES (S-1-15-2-1)
+    let _ = Command::new("icacls.exe")
+        .args([&dir_str, "/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "/T", "/C", "/Q"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    // Grant BUILTIN\Users (S-1-5-32-545)
+    let _ = Command::new("icacls.exe")
+        .args([&dir_str, "/grant", "*S-1-5-32-545:(OI)(CI)(RX)", "/T", "/C", "/Q"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 pub fn find_e11_packages() -> Vec<DiscoveredPackage> {
@@ -46,20 +110,20 @@ pub fn find_e11_packages() -> Vec<DiscoveredPackage> {
                     continue;
                 }
 
-                let target = path
+                let images_dir = path
                     .join("FileExplorerExtensions")
                     .join("Assets")
-                    .join("images")
-                    .join("contrast-standard");
+                    .join("images");
+                let contrast_standard_dir = images_dir.join("contrast-standard");
+                let genuine_orig_dir = images_dir.join("contrast-standard.original");
 
-                if target.exists()
-                    && (get_theme_dir(&target, "light").is_some()
-                        || get_theme_dir(&target, "dark").is_some())
-                {
+                if contrast_standard_dir.exists() || genuine_orig_dir.exists() {
                     let name = entry.file_name().to_string_lossy().to_string();
                     packages.push(DiscoveredPackage {
                         package_name: name,
-                        contrast_standard_dir: target,
+                        images_dir,
+                        contrast_standard_dir,
+                        genuine_orig_dir,
                     });
                 }
             }
@@ -69,16 +133,19 @@ pub fn find_e11_packages() -> Vec<DiscoveredPackage> {
     packages
 }
 
-pub fn get_theme_dir(contrast_standard: &Path, theme: &str) -> Option<PathBuf> {
-    let p1 = contrast_standard.join(format!("theme-{}", theme));
-    if p1.exists() {
-        return Some(p1);
+fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)?.flatten() {
+        let ty = entry.file_type()?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_all(&from, &to)?;
+        } else {
+            let _ = fs::copy(&from, &to);
+        }
     }
-    let p2 = contrast_standard.join(theme);
-    if p2.exists() {
-        return Some(p2);
-    }
-    None
+    Ok(())
 }
 
 pub fn ensure_backup_created(packages: &[DiscoveredPackage]) -> io::Result<()> {
@@ -86,79 +153,124 @@ pub fn ensure_backup_created(packages: &[DiscoveredPackage]) -> io::Result<()> {
 
     for pkg in packages {
         let pkg_backup_dir = backup_root.join(&pkg.package_name);
+        let src_root = if pkg.genuine_orig_dir.exists() {
+            &pkg.genuine_orig_dir
+        } else {
+            &pkg.contrast_standard_dir
+        };
 
-        for theme in ["light", "dark"] {
-            let src_theme_dir = match get_theme_dir(&pkg.contrast_standard_dir, theme) {
-                Some(dir) => dir,
-                None => continue,
-            };
-
-            let dst_theme_dir = pkg_backup_dir.join(format!("theme-{}", theme));
-            fs::create_dir_all(&dst_theme_dir)?;
-
-            if let Ok(files) = fs::read_dir(&src_theme_dir) {
-                for file_entry in files.flatten() {
-                    let file_path = file_entry.path();
-                    if file_path.extension().and_then(|s| s.to_str()) == Some("svg") {
-                        let file_name = file_entry.file_name();
-                        let backup_file = dst_theme_dir.join(&file_name);
-
-                        // Only copy if backup file does NOT exist yet
-                        // Preserves untouched Windows original
-                        if !backup_file.exists() {
-                            fs::copy(&file_path, &backup_file)?;
-                        }
-                    }
-                }
-            }
+        if src_root.exists() && (!pkg_backup_dir.exists() || !pkg_backup_dir.join("theme-light").exists()) {
+            copy_dir_all(src_root, &pkg_backup_dir)?;
         }
     }
 
     Ok(())
 }
 
-pub fn is_reparse_point(path: &Path) -> bool {
-    fs::symlink_metadata(path)
-        .map(|m| (m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
-        .unwrap_or(false)
-}
+pub fn ensure_junction_setup(pkg: &DiscoveredPackage) -> Result<PathBuf, String> {
+    let local_storage = get_exe_dir()
+        .join("contrast-standard")
+        .join(&pkg.package_name);
 
-pub fn is_dir_writable(dir: &Path) -> bool {
-    if !dir.exists() {
-        return false;
-    }
-    let test_file = dir.join(".ac_write_test");
-    match fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&test_file)
-    {
-        Ok(_) => {
-            let _ = fs::remove_file(test_file);
-            true
-        }
-        Err(_) => false,
-    }
-}
-
-fn write_file_with_retry(path: &Path, content: &str, retries: u32, delay_ms: u64) -> io::Result<()> {
-    let mut last_err = None;
-    for i in 0..retries {
-        match fs::write(path, content) {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                if e.kind() == io::ErrorKind::PermissionDenied {
-                    let _ = crate::security::take_ownership_and_grant_admin(path);
+    // 1. Ensure genuine_orig_dir exists with untouched factory SVGs
+    if !pkg.genuine_orig_dir.exists() {
+        if pkg.contrast_standard_dir.exists() {
+            if is_reparse_point(&pkg.contrast_standard_dir) {
+                // If already junction, restore genuine_orig_dir from backup folder if possible
+                let backup_dir = get_backup_root_dir().join(&pkg.package_name);
+                if backup_dir.exists() {
+                    let _ = copy_dir_all(&backup_dir, &pkg.genuine_orig_dir);
+                } else {
+                    return Err(format!(
+                        "contrast-standard is already a junction, but '{}' is missing.",
+                        pkg.genuine_orig_dir.display()
+                    ));
                 }
-                last_err = Some(e);
-                if i + 1 < retries {
-                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                }
+            } else {
+                // contrast_standard_dir is the genuine factory folder
+                let _ = crate::security::take_ownership_and_grant_admin(&pkg.images_dir);
+                let _ = crate::security::take_ownership_and_grant_admin_recursive(&pkg.contrast_standard_dir);
+                fs::rename(&pkg.contrast_standard_dir, &pkg.genuine_orig_dir)
+                    .map_err(|e| format!("Failed to rename genuine directory to .original: {}", e))?;
+            }
+        } else {
+            let backup_dir = get_backup_root_dir().join(&pkg.package_name);
+            if backup_dir.exists() {
+                let _ = copy_dir_all(&backup_dir, &pkg.genuine_orig_dir);
+            } else {
+                return Err("Neither contrast-standard nor contrast-standard.original found.".to_string());
             }
         }
     }
-    Err(last_err.unwrap())
+
+    // Also ensure external backup is preserved in backup/
+    let _ = ensure_backup_created(std::slice::from_ref(pkg));
+
+    // 2. Ensure local_storage exists and has initial copy of files
+    let theme_light_local = local_storage.join("theme-light");
+    if !local_storage.exists() || !theme_light_local.exists() {
+        fs::create_dir_all(&local_storage)
+            .map_err(|e| format!("Failed to create local storage directory: {}", e))?;
+        let _ = copy_dir_all(&pkg.genuine_orig_dir, &local_storage);
+        grant_app_packages_read(&get_exe_dir().join("contrast-standard"));
+        grant_app_packages_read(&local_storage);
+    }
+
+    // 3. Ensure junction exists at contrast_standard_dir
+    if !pkg.contrast_standard_dir.exists() {
+        create_junction(&pkg.contrast_standard_dir, &local_storage)
+            .map_err(|e| format!("Failed to create junction: {}", e))?;
+    } else if !is_reparse_point(&pkg.contrast_standard_dir) {
+        let _ = fs::remove_dir_all(&pkg.contrast_standard_dir);
+        create_junction(&pkg.contrast_standard_dir, &local_storage)
+            .map_err(|e| format!("Failed to create junction: {}", e))?;
+    }
+
+    Ok(local_storage)
+}
+
+fn get_or_load_templates(pkg: &DiscoveredPackage) -> Result<Vec<SvgTemplate>, String> {
+    let mut guard = TEMPLATES.lock().unwrap();
+    let map = guard.get_or_insert_with(HashMap::new);
+
+    if let Some(list) = map.get(&pkg.package_name) {
+        return Ok(list.clone());
+    }
+
+    let src_root = if pkg.genuine_orig_dir.exists() {
+        &pkg.genuine_orig_dir
+    } else {
+        &pkg.contrast_standard_dir
+    };
+
+    let mut list = Vec::new();
+    for (theme_name, theme_dir_name) in [("light", "theme-light"), ("dark", "theme-dark")] {
+        let theme_path = src_root.join(theme_dir_name);
+        if let Ok(entries) = fs::read_dir(&theme_path) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("svg")
+                    && let Ok(content) = fs::read_to_string(&path) {
+                        let file_name = entry.file_name();
+                        let rel_path = PathBuf::from(theme_dir_name).join(file_name);
+                        let is_spotlight = content.contains(SPOTLIGHT_DEFAULT_LIGHT);
+                        list.push(SvgTemplate {
+                            rel_path,
+                            content,
+                            theme: theme_name,
+                            is_spotlight,
+                        });
+                    }
+            }
+        }
+    }
+
+    if list.is_empty() {
+        return Err(format!("No SVG templates found in '{}'", src_root.display()));
+    }
+
+    map.insert(pkg.package_name.clone(), list.clone());
+    Ok(list)
 }
 
 pub fn apply_e11_colorization(
@@ -166,163 +278,84 @@ pub fn apply_e11_colorization(
     light_rgb: Rgb,
     dark_rgb: Rgb,
 ) -> Result<usize, String> {
-    ensure_backup_created(packages).map_err(|e| format!("Failed to create backup: {}", e))?;
-
-    let backup_root = get_backup_root_dir();
     let target_light_hex = light_rgb.to_hex();
     let target_dark_hex = dark_rgb.to_hex();
     let target_spotlight_hex = blend_colors(SPOTLIGHT_DARK_BASE, &target_light_hex, 82);
 
-    let mut modified_count = 0;
+    let mut total_modified = 0;
 
     for pkg in packages {
-        let pkg_backup_dir = backup_root.join(&pkg.package_name);
+        let local_storage = ensure_junction_setup(pkg)?;
+        let templates = get_or_load_templates(pkg)?;
 
-        for theme in ["light", "dark"] {
-            let target_theme_dir = match get_theme_dir(&pkg.contrast_standard_dir, theme) {
-                Some(dir) => dir,
-                None => continue,
-            };
-            let backup_theme_dir = pkg_backup_dir.join(format!("theme-{}", theme));
+        let num_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(16);
+        let chunk_size = templates.len().div_ceil(num_threads);
 
-            if !backup_theme_dir.exists() {
-                continue;
-            }
+        let modified_count = std::sync::atomic::AtomicUsize::new(0);
+        let modified_ref = &modified_count;
 
-            // Ensure write access recursively to directory and all files inside
-            if !is_dir_writable(&target_theme_dir) {
-                if let Err(e) = crate::security::take_ownership_and_grant_admin_recursive(&target_theme_dir) {
-                    return Err(format!(
-                        "Permission denied for '{}': {}. Run with Administrator privileges.",
-                        target_theme_dir.display(),
-                        e
-                    ));
-                }
-            }
+        std::thread::scope(|s| {
+            for chunk in templates.chunks(chunk_size) {
+                let light_hex = &target_light_hex;
+                let dark_hex = &target_dark_hex;
+                let spot_hex = &target_spotlight_hex;
+                let base_dir = &local_storage;
 
-            if let Ok(files) = fs::read_dir(&backup_theme_dir) {
-                for file_entry in files.flatten() {
-                    let file_name = file_entry.file_name();
-                    let backup_file_path = file_entry.path();
-                    let target_file_path = target_theme_dir.join(&file_name);
+                s.spawn(move || {
+                    for t in chunk {
+                        let patched = if t.theme == "light" {
+                            let mut c = replace_color_ignore_case(&t.content, DEFAULT_LIGHT_HEX, light_hex);
+                            if t.is_spotlight {
+                                c = c.replace(SPOTLIGHT_DEFAULT_LIGHT, spot_hex);
+                            }
+                            c
+                        } else {
+                            replace_color_ignore_case(&t.content, DEFAULT_DARK_HEX, dark_hex)
+                        };
 
-                    if backup_file_path.extension().and_then(|s| s.to_str()) != Some("svg") {
-                        continue;
-                    }
-
-                    let original_content = match fs::read_to_string(&backup_file_path) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            eprintln!(
-                                "[E11 SVG] Failed to read backup {}: {}",
-                                backup_file_path.display(),
-                                e
-                            );
-                            continue;
-                        }
-                    };
-
-                    let patched_content = if theme == "light" {
-                        replace_color_ignore_case(&original_content, DEFAULT_LIGHT_HEX, &target_light_hex)
-                            .replace(SPOTLIGHT_DEFAULT_LIGHT, &target_spotlight_hex)
-                    } else {
-                        replace_color_ignore_case(&original_content, DEFAULT_DARK_HEX, &target_dark_hex)
-                    };
-
-                    // Write with 3 retries (50ms interval) to avoid sharing violation locks
-                    match write_file_with_retry(&target_file_path, &patched_content, 3, 50) {
-                        Ok(_) => modified_count += 1,
-                        Err(e) => {
-                            eprintln!(
-                                "[E11 SVG] Warning: failed to write {}: {}",
-                                target_file_path.display(),
-                                e
-                            );
+                        let out_file = base_dir.join(&t.rel_path);
+                        if let Ok(()) = fs::write(out_file, patched) {
+                            modified_ref.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
-                }
+                });
             }
-        }
+        });
+
+        total_modified += modified_count.load(std::sync::atomic::Ordering::Relaxed);
     }
 
-    Ok(modified_count)
+    Ok(total_modified)
 }
 
 pub fn revert_e11_colorization(packages: &[DiscoveredPackage]) -> Result<usize, String> {
-    let backup_root = get_backup_root_dir();
-    if !backup_root.exists() {
-        return Err("No backup directory found. Nothing to restore.".to_string());
-    }
-
     let mut restored_count = 0;
 
     for pkg in packages {
-        let pkg_backup_dir = backup_root.join(&pkg.package_name);
-        let target_junction = &pkg.contrast_standard_dir;
-
-        // If junction exists, remove junction link and recreate genuine directory
-        if is_reparse_point(target_junction) {
-            if let Some(parent) = target_junction.parent() {
-                let _ = crate::security::take_ownership_and_grant_admin(parent);
-            }
-            let _ = fs::remove_dir(target_junction);
-            let _ = fs::create_dir_all(target_junction);
+        // 1. If contrast_standard_dir is a junction, remove the junction link
+        if is_reparse_point(&pkg.contrast_standard_dir) {
+            let _ = fs::remove_dir(&pkg.contrast_standard_dir);
         }
 
-        for theme in ["light", "dark"] {
-            let target_theme_dir = match get_theme_dir(&pkg.contrast_standard_dir, theme) {
-                Some(dir) => dir,
-                None => {
-                    let fallback = pkg.contrast_standard_dir.join(format!("theme-{}", theme));
-                    let _ = fs::create_dir_all(&fallback);
-                    fallback
-                }
-            };
-            let backup_theme_dir = pkg_backup_dir.join(format!("theme-{}", theme));
-
-            if !backup_theme_dir.exists() {
-                continue;
-            }
-
-            // Ensure write access to restore files
-            let _ = crate::security::take_ownership_and_grant_admin_recursive(&target_theme_dir);
-
-            if let Ok(files) = fs::read_dir(&backup_theme_dir) {
-                for file_entry in files.flatten() {
-                    let file_name = file_entry.file_name();
-                    let backup_file_path = file_entry.path();
-                    let target_file_path = target_theme_dir.join(&file_name);
-
-                    if backup_file_path.extension().and_then(|s| s.to_str()) != Some("svg") {
-                        continue;
-                    }
-
-                    if fs::copy(&backup_file_path, &target_file_path).is_err() {
-                        let _ = crate::security::take_ownership_and_grant_admin(&target_file_path);
-                        if fs::copy(&backup_file_path, &target_file_path).is_ok() {
-                            restored_count += 1;
-                        }
-                    } else {
-                        restored_count += 1;
-                    }
-                }
-            }
-
-            // Crucial for DISM and SFC: Restore ownership back to TrustedInstaller and reset permissions
-            crate::security::restore_trusted_installer_recursive(&target_theme_dir);
+        // 2. If genuine_orig_dir exists, move it back to contrast_standard_dir
+        if pkg.genuine_orig_dir.exists() && !pkg.contrast_standard_dir.exists() {
+            let _ = fs::rename(&pkg.genuine_orig_dir, &pkg.contrast_standard_dir);
         }
 
-        let _ = crate::security::restore_trusted_installer(target_junction);
-        if let Some(parent) = target_junction.parent() {
-            let _ = crate::security::restore_trusted_installer(parent);
+        // 3. Restore TrustedInstaller ownership recursively
+        if pkg.contrast_standard_dir.exists() {
+            crate::security::restore_trusted_installer_recursive(&pkg.contrast_standard_dir);
+            let _ = crate::security::restore_trusted_installer(&pkg.images_dir);
+            restored_count += 1;
         }
     }
 
-    // Clean up local contrast-standard storage folder next to exe if left over from previous versions
-    let local_storage = get_exe_dir().join("contrast-standard");
-    if local_storage.exists() {
-        let _ = fs::remove_dir_all(local_storage);
-    }
+    // Invalidate RAM cache so next apply will re-read fresh originals
+    let mut guard = TEMPLATES.lock().unwrap();
+    *guard = None;
 
     Ok(restored_count)
 }

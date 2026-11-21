@@ -100,19 +100,18 @@ pub fn restore_sys_colors() {
     modify_styles(207.0, win_ver, true, true);
 }
 
-pub fn set_preferred_app_mode(mode: i32) {
+fn set_preferred_app_mode(mode: i32) {
     unsafe {
         let uxtheme = LoadLibraryW(encode_wide("uxtheme.dll").as_ptr());
-        if !uxtheme.is_null() {
-            if let Some(proc) = GetProcAddress(uxtheme, 135 as *const u8) {
+        if !uxtheme.is_null()
+            && let Some(proc) = GetProcAddress(uxtheme, 135 as *const u8) {
                 let func: unsafe extern "system" fn(i32) -> i32 = std::mem::transmute(proc);
                 func(mode);
             }
-        }
     }
 }
 
-pub fn init_dark_mode() {
+fn init_dark_mode() {
     set_preferred_app_mode(1); // AllowDark
 }
 
@@ -225,7 +224,7 @@ fn iterate_bitmap(hbm: HBITMAP, accent_h: f64, tint_gray_fill: bool) -> bool {
         }
         .to_rgb();
 
-        for chunk in bits.chunks_exact_mut(4) {
+        for chunk in bits.as_chunks_mut::<4>().0 {
             let b = chunk[0];
             let g = chunk[1];
             let r = chunk[2];
@@ -315,7 +314,7 @@ fn set_class_dividers(cls: &str, divider_val: u8) {
     }
 }
 
-pub fn restore_header_dividers() {
+fn restore_header_dividers() {
     // 1. Force Light mode to access and restore Light theme headers to default #E5E5E5
     set_preferred_app_mode(3); // ForceLight
     set_class_dividers("ItemsView::Header", 0xE5);
@@ -354,7 +353,7 @@ fn iterate_light_pargb_bitmap(hbm: HBITMAP, base_accent: Rgb) -> bool {
             return false;
         }
 
-        for chunk in bits.chunks_exact_mut(4) {
+        for chunk in bits.as_chunks_mut::<4>().0 {
             let a = chunk[3];
             if a > 0 {
                 chunk[0] = ((base_accent.b as u32 * a as u32) / 255) as u8;
@@ -765,8 +764,8 @@ pub fn modify_styles(
         }
     }
 
-    if colorize_menus {
-        if let Some(t) = ThemeSession::new("Menu") {
+    if colorize_menus
+        && let Some(t) = ThemeSession::new("Menu") {
             t.modify_style(14, 0, TMT_DIBDATA, accent_h);
             t.modify_style(13, 0, TMT_DIBDATA, accent_h);
             t.modify_style(12, 0, TMT_DIBDATA, accent_h);
@@ -778,7 +777,6 @@ pub fn modify_styles(
                 }
             }
         }
-    }
 
     if colorize_progress_bar {
         if let Some(t) = ThemeSession::new("Progress") {

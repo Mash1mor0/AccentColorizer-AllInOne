@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LRESULT, WAIT_OBJECT_0, WPARAM};
+use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::System::Registry::{
     HKEY_CURRENT_USER, RegCloseKey, RegNotifyChangeKeyValue, RegOpenKeyExW, KEY_NOTIFY,
@@ -28,7 +29,10 @@ const WM_DWMCOLORIZATIONCOLORCHANGED: u32 = 0x0320;
 const WM_THEMECHANGED: u32 = 0x031A;
 const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
 const WM_TIMER: u32 = 0x0113;
+const WM_CLOSE: u32 = 0x0010;
+const WM_QUERYENDSESSION: u32 = 0x0011;
 const WM_SYSCOLORCHANGE: u32 = 0x0015;
+const WM_ENDSESSION: u32 = 0x0016;
 
 const WTS_SESSION_UNLOCK: usize = 0x8;
 const NOTIFY_FOR_THIS_SESSION: u32 = 0;
@@ -36,6 +40,7 @@ const TIMER_TRAILING_CHECK: usize = 1002;
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 static IS_APPLYING: AtomicBool = AtomicBool::new(false);
+static CLEANED_UP: AtomicBool = AtomicBool::new(false);
 static CONFIG: Mutex<Option<AppConfig>> = Mutex::new(None);
 static LAST_ACCENT: Mutex<Option<Rgb>> = Mutex::new(None);
 static LAST_E11_ACCENT: Mutex<Option<Rgb>> = Mutex::new(None);
@@ -44,8 +49,29 @@ static LAST_APPLIED_TIME: Mutex<Option<Instant>> = Mutex::new(None);
 type FnWTSRegisterSessionNotification = unsafe extern "system" fn(HWND, u32) -> i32;
 type FnWTSUnRegisterSessionNotification = unsafe extern "system" fn(HWND) -> i32;
 
+pub fn cleanup_on_exit() {
+    if CLEANED_UP.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    log_info!("[Shutdown] Restoring factory icons and system colors...");
+    crate::win32_theme::restore_sys_colors();
+    let packages = find_e11_packages();
+    if !packages.is_empty() {
+        let _ = crate::e11_svg::revert_e11_colorization(&packages);
+    }
+}
+
+unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> i32 {
+    cleanup_on_exit();
+    0
+}
+
 pub fn run_listener(config: AppConfig) {
     let win_ver = detect_windows_version();
+
+    unsafe {
+        SetConsoleCtrlHandler(Some(ctrl_handler), 1);
+    }
 
     // Initial apply on daemon startup
     let initial_accent = match &config.custom_accent_hex {
@@ -68,6 +94,10 @@ pub fn run_listener(config: AppConfig) {
         *LAST_E11_ACCENT.lock().unwrap() = Some(initial_accent);
         *LAST_APPLIED_TIME.lock().unwrap() = Some(Instant::now());
     }
+
+    // Broadcast theme refresh pulse so running Explorer flushes its cache immediately
+    crate::system::broadcast_theme_refresh();
+    log_info!("[System] Broadcasted theme refresh pulse to flush Explorer cache.");
 
     unsafe {
         let instance = GetModuleHandleW(std::ptr::null());
@@ -128,12 +158,11 @@ pub fn run_listener(config: AppConfig) {
 
         // Register session notification (lock/unlock)
         let wts_mod = LoadLibraryW(encode_wide("wtsapi32.dll").as_ptr());
-        if !wts_mod.is_null() {
-            if let Some(proc) = GetProcAddress(wts_mod, b"WTSRegisterSessionNotification\0".as_ptr()) {
+        if !wts_mod.is_null()
+            && let Some(proc) = GetProcAddress(wts_mod, c"WTSRegisterSessionNotification".as_ptr().cast()) {
                 let register: FnWTSRegisterSessionNotification = std::mem::transmute(proc);
                 register(hwnd, NOTIFY_FOR_THIS_SESSION);
             }
-        }
 
         log_info!("[Listener] Message loop active. Listening for Windows theme & color events...");
 
@@ -144,12 +173,13 @@ pub fn run_listener(config: AppConfig) {
         }
 
         // Cleanup WTS registration
-        if !wts_mod.is_null() {
-            if let Some(proc) = GetProcAddress(wts_mod, b"WTSUnRegisterSessionNotification\0".as_ptr()) {
+        if !wts_mod.is_null()
+            && let Some(proc) = GetProcAddress(wts_mod, c"WTSUnRegisterSessionNotification".as_ptr().cast()) {
                 let unregister: FnWTSUnRegisterSessionNotification = std::mem::transmute(proc);
                 unregister(hwnd);
             }
-        }
+
+        cleanup_on_exit();
     }
 }
 
@@ -207,7 +237,7 @@ fn watch_registry_changes(hwnd_raw: usize) {
                 1000,
             );
 
-            if res >= WAIT_OBJECT_0 && res < WAIT_OBJECT_0 + events.len() as u32 {
+            if res < WAIT_OBJECT_0 + events.len() as u32 {
                 let idx = (res - WAIT_OBJECT_0) as usize;
                 // Post WM_THEMECHANGED into our window message queue.
                 // Because this is posted from within our own process, UIPI never blocks it.
@@ -330,8 +360,17 @@ unsafe extern "system" fn wndproc(
             }
             0
         }
-        WM_DESTROY => {
+        WM_QUERYENDSESSION => 1,
+        WM_ENDSESSION => {
+            if wparam != 0 {
+                RUNNING.store(false, Ordering::SeqCst);
+                cleanup_on_exit();
+            }
+            0
+        }
+        WM_CLOSE | WM_DESTROY => {
             RUNNING.store(false, Ordering::SeqCst);
+            cleanup_on_exit();
             unsafe {
                 KillTimer(hwnd, TIMER_TRAILING_CHECK);
                 PostQuitMessage(0);

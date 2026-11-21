@@ -93,6 +93,10 @@ pub fn run_cli() {
                     }
                 }
             }
+
+            if win32 || e11 {
+                crate::system::broadcast_theme_refresh();
+            }
         }
         "revert" | "restore" | "--revert" | "-revert" => {
             let mut force_restart_explorer = true; // Auto-restart on revert to flush cached icons
