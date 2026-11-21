@@ -28,9 +28,9 @@
   * System file integrity checks (`sfc /scannow`, `DISM /Online /Cleanup-Image /RestoreHealth`) remain 100% clean and passing.
   * Zero code injection into `explorer.exe`, zero API hooking, zero third-party DLL dependencies.
 
-* **Fluent UI 8px Continuous Rounded Selection Plates**:
+* **8px Continuous Rounded Selection Plates**:
   * Replaces legacy sharp selection rectangles on the Desktop and in File Explorer with modern, continuous 8px rounded corners.
-  * Hand-tuned opacity and border balance matching Windows 11 Fluent Design:
+  * Hand-tuned opacity and border balance matching Windows 11:
     * **State 2 (Hover / Hot)**: 30% fill opacity with a continuous 1px border.
     * **State 3 (Selected)**: 45% fill opacity borderless.
     * **State 6 (Hot Selected)**: 70% fill opacity borderless.
@@ -55,7 +55,7 @@
 ![File Explorer Tabs & Navigation](screenshots/5.png)
 ![File Explorer Toolbar](screenshots/6.png)
 
-### Fluent UI Selection Plates & Context Menus
+### UI Selection Plates & Context Menus
 ![Context Menus & Selections](screenshots/3.png)
 ![Win32 Menus & Controls](screenshots/4.png)
 ![Desktop Item Selection](screenshots/7.png)
@@ -86,7 +86,6 @@ This single command:
    * **Startup Delay**: 30 seconds (`/DELAY 0000:30`), allowing Windows Explorer and desktop shell to initialize smoothly.
    * **Privileges**: Highest Administrator privileges (`/RL HIGHEST`), preventing UAC popups on boot.
    * **Power Settings**: Configured to run on laptops even on battery power (`AllowStartIfOnBatteries`) and will not stop if unplugged (`DontStopIfGoingOnBatteries`).
-   * **Execution Limit**: 3-day timeout removed (`ExecutionTimeLimit = PT0S`), ensuring continuous operation.
 
 To uninstall and completely remove the autostart task and shortcut:
 ```cmd
@@ -147,7 +146,7 @@ AccentColorizer.exe daemon --foreground
 ## 🛠️ Building from Source
 
 ### Prerequisites
-* Rust toolchain (2024 edition or later, `cargo` and `rustc`).
+* Rust toolchain (`cargo` and `rustc`).
 * Windows 11 SDK (standard build environment).
 
 ### Build Command
