@@ -269,15 +269,6 @@ pub fn get_timestamp() -> String {
     }
 }
 
-pub fn get_exe_dir() -> PathBuf {
-    if let Ok(exe_path) = env::current_exe()
-        && let Some(parent) = exe_path.parent()
-    {
-        return parent.to_path_buf();
-    }
-    PathBuf::from(".")
-}
-
 #[macro_export]
 macro_rules! log_info {
     ($($arg:tt)*) => {
@@ -290,4 +281,130 @@ macro_rules! log_err {
     ($($arg:tt)*) => {
         eprintln!("[{}] {}", $crate::system::get_timestamp(), format_args!($($arg)*))
     };
+}
+
+pub const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+pub fn get_exe_dir() -> PathBuf {
+    if let Ok(exe_path) = env::current_exe()
+        && let Some(parent) = exe_path.parent()
+    {
+        return parent.to_path_buf();
+    }
+    PathBuf::from(".")
+}
+
+pub fn setup_autostart_task(flags: &[String]) -> Result<(), String> {
+    let exe_dir = get_exe_dir();
+    let exe_path = env::current_exe().unwrap_or_else(|_| exe_dir.join("AccentColorizer.exe"));
+    let lnk_path = exe_dir.join("AccentColorizer.lnk");
+
+    let flags_str = flags.join(" ");
+
+    // 1. Create shortcut (.lnk) in exe directory
+    let script = format!(
+        "$ws = New-Object -ComObject WScript.Shell; \
+         $s = $ws.CreateShortcut('{lnk}'); \
+         $s.TargetPath = '{exe}'; \
+         $s.Arguments = '{args}'; \
+         $s.WorkingDirectory = '{dir}'; \
+         $s.Save()",
+        lnk = lnk_path.to_string_lossy().replace('\'', "''"),
+        exe = exe_path.to_string_lossy().replace('\'', "''"),
+        args = flags_str.replace('\'', "''"),
+        dir = exe_dir.to_string_lossy().replace('\'', "''"),
+    );
+
+    let ps_res = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+
+    match ps_res {
+        Ok(s) if s.success() => {
+            log_info!("[Shortcut] Created shortcut: {}", lnk_path.display());
+        }
+        Ok(s) => {
+            log_err!("[Shortcut] PowerShell exited with status: {}", s);
+        }
+        Err(e) => {
+            log_err!("[Shortcut] Failed to execute PowerShell: {}", e);
+        }
+    }
+
+    // 2. Create Task Scheduler task (Run at logon of any user with 30s delay, highest privileges)
+    let task_run = if flags_str.is_empty() {
+        format!("\"{}\"", exe_path.display())
+    } else {
+        format!("\"{}\" {}", exe_path.display(), flags_str)
+    };
+
+    let sch_status = Command::new("schtasks.exe")
+        .args([
+            "/Create",
+            "/TN",
+            "AccentColorizer",
+            "/TR",
+            &task_run,
+            "/SC",
+            "ONLOGON",
+            "/DELAY",
+            "0000:30",
+            "/RL",
+            "HIGHEST",
+            "/F",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    match sch_status {
+        Ok(out) if out.status.success() => {
+            log_info!(
+                "[TaskScheduler] Task 'AccentColorizer' successfully created (ONLOGON, 30s delay, HIGHEST privileges)."
+            );
+            Ok(())
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr);
+            let msg = if err.trim().is_empty() {
+                String::from_utf8_lossy(&out.stdout).to_string()
+            } else {
+                err.to_string()
+            };
+            Err(format!("schtasks failed: {}", msg.trim()))
+        }
+        Err(e) => Err(format!("Failed to execute schtasks.exe: {}", e)),
+    }
+}
+
+pub fn remove_autostart_task() -> Result<(), String> {
+    let exe_dir = get_exe_dir();
+    let lnk_path = exe_dir.join("AccentColorizer.lnk");
+
+    if lnk_path.exists() {
+        let _ = std::fs::remove_file(&lnk_path);
+        log_info!("[Shortcut] Removed shortcut: {}", lnk_path.display());
+    }
+
+    let sch_status = Command::new("schtasks.exe")
+        .args(["/Delete", "/TN", "AccentColorizer", "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    match sch_status {
+        Ok(out) if out.status.success() => {
+            log_info!("[TaskScheduler] Task 'AccentColorizer' removed.");
+            Ok(())
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr);
+            if err.contains("cannot find") || err.contains("не удается найти") {
+                log_info!("[TaskScheduler] Task 'AccentColorizer' was not registered.");
+                Ok(())
+            } else {
+                Err(format!("schtasks delete failed: {}", err.trim()))
+            }
+        }
+        Err(e) => Err(format!("Failed to execute schtasks.exe: {}", e)),
+    }
 }

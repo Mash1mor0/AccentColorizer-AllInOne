@@ -166,6 +166,20 @@ pub fn run_cli() {
         "--version" | "-v" => {
             println!("AccentColorizer v{}", env!("CARGO_PKG_VERSION"));
         }
+        "autostart" | "--autostart" | "install" | "--install" => {
+            crate::log_info!("[Autostart] Registering shortcut and Task Scheduler task (30s logon delay)...");
+            match crate::system::setup_autostart_task(&args[2..]) {
+                Ok(()) => crate::log_info!("[Autostart] Setup completed successfully."),
+                Err(e) => crate::log_err!("[Autostart] Setup failed: {}", e),
+            }
+        }
+        "uninstall" | "--uninstall" | "remove-autostart" | "--remove-autostart" => {
+            crate::log_info!("[Autostart] Removing autostart shortcut and Task Scheduler task...");
+            match crate::system::remove_autostart_task() {
+                Ok(()) => crate::log_info!("[Autostart] Removed successfully."),
+                Err(e) => crate::log_err!("[Autostart] Removal failed: {}", e),
+            }
+        }
         "daemon" | "--daemon" | "-d" => {
             let (config, foreground) = parse_flags(&args[2..]);
             start_daemon_mode(config, foreground);
@@ -230,6 +244,8 @@ Accent color is detected AUTOMATICALLY from Windows personalization settings.
 Commands:
   apply                 Apply accent colors immediately once and exit
   revert, restore       Restore pristine originals (.original) and restore TrustedInstaller ownership (DISM/SFC safe)
+  autostart [OPTIONS]   Create shortcut in exe directory and register 30-sec delayed logon Task Scheduler task
+  uninstall             Remove autostart shortcut and Task Scheduler task
   --help, -h            Show this help message
   --version, -v         Show version
 
