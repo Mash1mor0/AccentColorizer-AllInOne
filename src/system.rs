@@ -301,38 +301,7 @@ pub fn setup_autostart_task(flags: &[String]) -> Result<(), String> {
 
     let flags_str = flags.join(" ");
 
-    // 1. Create shortcut (.lnk) in exe directory
-    let script = format!(
-        "$ws = New-Object -ComObject WScript.Shell; \
-         $s = $ws.CreateShortcut('{lnk}'); \
-         $s.TargetPath = '{exe}'; \
-         $s.Arguments = '{args}'; \
-         $s.WorkingDirectory = '{dir}'; \
-         $s.Save()",
-        lnk = lnk_path.to_string_lossy().replace('\'', "''"),
-        exe = exe_path.to_string_lossy().replace('\'', "''"),
-        args = flags_str.replace('\'', "''"),
-        dir = exe_dir.to_string_lossy().replace('\'', "''"),
-    );
-
-    let ps_res = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .creation_flags(CREATE_NO_WINDOW)
-        .status();
-
-    match ps_res {
-        Ok(s) if s.success() => {
-            log_info!("[Shortcut] Created shortcut: {}", lnk_path.display());
-        }
-        Ok(s) => {
-            log_err!("[Shortcut] PowerShell exited with status: {}", s);
-        }
-        Err(e) => {
-            log_err!("[Shortcut] Failed to execute PowerShell: {}", e);
-        }
-    }
-
-    // 2. Create Task Scheduler task (Run at logon of any user with 30s delay, highest privileges)
+    // 1. Create Task Scheduler task (Run at logon of any user with 30s delay, highest privileges)
     let task_run = if flags_str.is_empty() {
         format!("\"{}\"", exe_path.display())
     } else {
@@ -360,9 +329,8 @@ pub fn setup_autostart_task(flags: &[String]) -> Result<(), String> {
     match sch_status {
         Ok(out) if out.status.success() => {
             log_info!(
-                "[TaskScheduler] Task 'AccentColorizer' successfully created (ONLOGON, 30s delay, HIGHEST privileges)."
+                "[TaskScheduler] Task 'AccentColorizer' created (ONLOGON, 30s delay, HIGHEST privileges)."
             );
-            Ok(())
         }
         Ok(out) => {
             let err = String::from_utf8_lossy(&out.stderr);
@@ -371,10 +339,56 @@ pub fn setup_autostart_task(flags: &[String]) -> Result<(), String> {
             } else {
                 err.to_string()
             };
-            Err(format!("schtasks failed: {}", msg.trim()))
+            return Err(format!("schtasks failed: {}", msg.trim()));
         }
-        Err(e) => Err(format!("Failed to execute schtasks.exe: {}", e)),
+        Err(e) => return Err(format!("Failed to execute schtasks.exe: {}", e)),
     }
+
+    // 2. Create shortcut (.lnk) and remove battery/power restrictions from Task Scheduler
+    let script = format!(
+        r#"$ws = New-Object -ComObject WScript.Shell;
+$s = $ws.CreateShortcut('{lnk}');
+$s.TargetPath = '{exe}';
+$s.Arguments = '{args}';
+$s.WorkingDirectory = '{dir}';
+$s.Save();
+try {{
+    $ts = New-Object -ComObject Schedule.Service;
+    $ts.Connect();
+    $t = $ts.GetFolder('\').GetTask('AccentColorizer');
+    $d = $t.Definition;
+    $d.Settings.DisallowStartIfOnBatteries = $false;
+    $d.Settings.StopIfGoingOnBatteries = $false;
+    $d.Settings.ExecutionTimeLimit = 'PT0S';
+    $null = $ts.GetFolder('\').RegisterTaskDefinition('AccentColorizer', $d, 6, $null, $null, $d.Principal.LogonType);
+}} catch {{
+    Set-ScheduledTask -TaskName 'AccentColorizer' -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0) -ErrorAction SilentlyContinue;
+}}"#,
+        lnk = lnk_path.to_string_lossy().replace('\'', "''"),
+        exe = exe_path.to_string_lossy().replace('\'', "''"),
+        args = flags_str.replace('\'', "''"),
+        dir = exe_dir.to_string_lossy().replace('\'', "''"),
+    );
+
+    let ps_res = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+
+    match ps_res {
+        Ok(s) if s.success() => {
+            log_info!("[Shortcut] Created shortcut: {}", lnk_path.display());
+            log_info!("[TaskScheduler] Power settings updated: battery restrictions removed, unlimited runtime.");
+        }
+        Ok(s) => {
+            log_err!("[TaskScheduler] PowerShell exited with status: {}", s);
+        }
+        Err(e) => {
+            log_err!("[TaskScheduler] Failed to execute PowerShell: {}", e);
+        }
+    }
+
+    Ok(())
 }
 
 pub fn remove_autostart_task() -> Result<(), String> {
