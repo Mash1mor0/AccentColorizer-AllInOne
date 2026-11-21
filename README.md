@@ -42,7 +42,7 @@
 
 * **Single Self-Contained Portable Binary**:
   * Compiled with `#![windows_subsystem = "windows"]` for completely silent execution (no flashing console windows or lingering `conhost.exe`).
-  * Single `.exe` (~364 KB, stripped release build) with zero external dependencies (no runtime requirements, no config files needed).
+  * Single `.exe` with zero external dependencies (no runtime requirements, no config files needed).
   * Automatically requests Administrator privileges only when needed.
 
 ---
@@ -156,7 +156,7 @@ cargo build --release
 ```
 
 The resulting standalone executable will be generated at:
-`target/release/AccentColorizer.exe` (~364 KB).
+`target/release/AccentColorizer.exe`.
 
 ---
 
