@@ -5,7 +5,6 @@ use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
 
 mod cli;
 mod color;
-mod config;
 mod e11_svg;
 mod listener;
 mod security;
@@ -22,9 +21,26 @@ fn main() {
         return;
     }
 
-    // If run from a command prompt with CLI commands (apply, revert, --help, etc.),
+    // If run from a command prompt with interactive CLI commands (apply, revert, --help, etc.),
     // attach to the caller's console so stdout/stderr print cleanly without popping up a new window.
-    if args.len() > 1 && args[1] != "daemon" && args[1] != "--daemon" && args[1] != "-d" {
+    let is_interactive = args.len() > 1
+        && matches!(
+            args[1].to_ascii_lowercase().as_str(),
+            "apply"
+                | "--apply"
+                | "-apply"
+                | "revert"
+                | "restore"
+                | "--revert"
+                | "-revert"
+                | "--help"
+                | "-h"
+                | "help"
+                | "/?"
+                | "--version"
+                | "-v"
+        );
+    if is_interactive {
         unsafe {
             AttachConsole(ATTACH_PARENT_PROCESS);
         }

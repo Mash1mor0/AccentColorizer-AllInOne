@@ -1,5 +1,6 @@
 use std::env;
 use std::os::windows::process::CommandExt;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, SYSTEMTIME,
@@ -266,6 +267,15 @@ pub fn get_timestamp() -> String {
         GetLocalTime(&mut st);
         format!("{:02}:{:02}:{:02}", st.wHour, st.wMinute, st.wSecond)
     }
+}
+
+pub fn get_exe_dir() -> PathBuf {
+    if let Ok(exe_path) = env::current_exe()
+        && let Some(parent) = exe_path.parent()
+    {
+        return parent.to_path_buf();
+    }
+    PathBuf::from(".")
 }
 
 #[macro_export]

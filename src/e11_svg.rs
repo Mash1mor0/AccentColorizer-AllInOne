@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 use crate::color::{blend_colors, Rgb};
-use crate::config::get_exe_dir;
+use crate::system::get_exe_dir;
 
 const DEFAULT_LIGHT_HEX: &str = "#0078D4";
 const DEFAULT_DARK_HEX: &str = "#4CC2FF";

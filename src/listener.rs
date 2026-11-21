@@ -18,11 +18,31 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::color::{encode_wide, get_current_dark_system_accent, get_current_system_accent, Rgb};
-use crate::config::AppConfig;
 use crate::e11_svg::{apply_e11_colorization, find_e11_packages};
 use crate::system::{detect_windows_version, restart_explorer, WindowsVersion};
 use crate::win32_theme::{modify_styles, modify_sys_colors};
 use crate::{log_err, log_info};
+
+#[derive(Debug, Clone)]
+pub struct AppConfig {
+    pub colorize_menus: bool,
+    pub colorize_progress_bar: bool,
+    pub colorize_e11_svg: bool,
+    pub restart_explorer: bool,
+    pub custom_accent_hex: Option<String>,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            colorize_menus: true,
+            colorize_progress_bar: true,
+            colorize_e11_svg: true,
+            restart_explorer: false,
+            custom_accent_hex: None,
+        }
+    }
+}
 
 const WM_SETTINGCHANGE: u32 = 0x001A;
 const WM_DWMCOLORIZATIONCOLORCHANGED: u32 = 0x0320;
